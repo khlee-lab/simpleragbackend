@@ -294,6 +294,12 @@ def get_indexer_status():
 # FastAPI 앱 생성
 app = FastAPI()
 
+# Import and use the health check 
+from healthcheck import verify_app_health
+
+# Assuming you have a FastAPI app instance called "app"
+app = verify_app_health(app)
+
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     try:
@@ -409,7 +415,7 @@ async def indexer_status():
                 data={"indexing_status": "error: configuration_missing"},
                 timestamp=datetime.now().isoformat()
             )
-            
+
         if not AZURE_SEARCH_KEY or not isinstance(AZURE_SEARCH_KEY, str):
             return StandardResponse(
                 success=False,
@@ -417,13 +423,32 @@ async def indexer_status():
                 data={"indexing_status": "error: configuration_missing"},
                 timestamp=datetime.now().isoformat()
             )
-        
+
         status = get_indexer_status()
-        
+
+        # If the indexer status is "reset", trigger the indexer to run immediately.
+        if status == "reset":
+            try:
+                indexer_client = SearchIndexerClient(
+                    endpoint=AZURE_SEARCH_ENDPOINT,
+                    credential=AzureKeyCredential(AZURE_SEARCH_KEY)
+                )
+                indexer_client.run_indexer(INDEXER_NAME)
+                status = "running"
+                logger.info("Indexer was reset; now executing indexer_run to resume indexing.")
+            except Exception as e:
+                logger.error(f"Error running indexer after reset: {str(e)}")
+                return StandardResponse(
+                    success=False,
+                    message=f"Failed to run indexer after reset: {str(e)}",
+                    data={"indexing_status": status},
+                    timestamp=datetime.now().isoformat()
+                )
+
         message = "인덱싱 상태 확인 완료"
         if status == "not_found":
             message = "인덱서가 존재하지 않습니다. PDF를 업로드하여 인덱서를 생성하세요."
-        
+
         return StandardResponse(
             success=True,
             message=message,

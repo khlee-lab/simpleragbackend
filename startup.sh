@@ -1,7 +1,11 @@
 #!/bin/bash
 
-# Install dependencies if not already installed
+# Upgrade pip and install dependencies
+pip install --upgrade pip
 pip install -r requirements.txt
 
-# Start the application with Gunicorn
-gunicorn main:app --bind=0.0.0.0:${PORT:-8000} -k uvicorn.workers.UvicornWorker
+# Use the PORT environment variable provided by Azure or default to 8000
+PORT=${PORT:-8000}
+
+# Start the application using Gunicorn
+gunicorn --bind=0.0.0.0:$PORT main:app
