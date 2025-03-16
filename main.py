@@ -43,6 +43,7 @@ class StandardResponse(BaseModel):
     data: Optional[Any] = None
     timestamp: str
 
+# Create the FastAPI app (single instance)
 app = FastAPI()
 
 # Configure CORS
@@ -290,9 +291,6 @@ def get_indexer_status():
     except Exception as e:
         logger.error(f"Unexpected error in get_indexer_status: {str(e)}")
         return f"error: {str(e)}"
-
-# FastAPI 앱 생성
-app = FastAPI()
 
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
