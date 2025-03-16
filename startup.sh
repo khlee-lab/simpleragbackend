@@ -4,4 +4,4 @@
 pip install -r requirements.txt
 
 # Start the application with Gunicorn
-gunicorn main:app --bind=0.0.0.0:${PORT:-8000} -k uvicorn.workers.UvicornWorker
+gunicorn --bind=0.0.0.0 --timeout 600 --workers 4 main:app

@@ -438,6 +438,48 @@ async def indexer_status():
             timestamp=datetime.now().isoformat()
         )
 
+@app.get("/upload-status")
+async def check_file_status(filename: str):
+    """Check if a file with the given filename has been uploaded."""
+    try:
+        blob_service = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
+        container_client = blob_service.get_container_client(CONTAINER_NAME)
+        
+        # Verify container exists
+        try:
+            container_client.get_container_properties()
+        except:
+            return StandardResponse(
+                success=False,
+                message="Container not found. Please upload a file first.",
+                timestamp=datetime.now().isoformat()
+            )
+        
+        # Check if file blob exists
+        blobs = container_client.list_blobs()
+        for blob in blobs:
+            if blob.name == filename:
+                return StandardResponse(
+                    success=True,
+                    message="File found.",
+                    data={"filename": filename},
+                    timestamp=datetime.now().isoformat()
+                )
+        
+        return StandardResponse(
+            success=False,
+            message="File not found.",
+            data={"filename": filename},
+            timestamp=datetime.now().isoformat()
+        )
+    except Exception as e:
+        logger.error(f"Check file status error: {str(e)}")
+        return StandardResponse(
+            success=False,
+            message=f"Error checking file status: {str(e)}",
+            timestamp=datetime.now().isoformat()
+        )
+
 def search_pdf_content(query: str, top_k=3) -> dict:
     """Query Azure Search index for relevant PDF content and return structured results."""
     try:
@@ -613,7 +655,7 @@ async def chat(prompt: str):
 
         # Create system message with the PDF content
         system_message = """You are an AI assistant that helps answer questions based on PDF documents.
-Answer based ONLY on the content in the documents provided below.
+Answer based ONLY on the content in the documents provided below. and check liskt will be provided
 If the information isn't in the documents, clearly state that.
 
 Here is the content from the uploaded PDF documents:
