@@ -1,11 +1,7 @@
 #!/bin/bash
 
-# Make sure the script is executable in Linux environments
-chmod +x startup.sh
-
-# Upgrade pip and install dependencies
-pip install --upgrade pip
+# Install dependencies if not already installed
 pip install -r requirements.txt
 
-# Start the application using Gunicorn
-gunicorn --bind=0.0.0.0:8000 main:app
+# Start the application with Gunicorn
+gunicorn main:app --bind=0.0.0.0:${PORT:-8000} -k uvicorn.workers.UvicornWorker

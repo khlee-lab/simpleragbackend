@@ -291,6 +291,9 @@ def get_indexer_status():
         logger.error(f"Unexpected error in get_indexer_status: {str(e)}")
         return f"error: {str(e)}"
 
+# FastAPI 앱 생성
+app = FastAPI()
+
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     try:
@@ -432,47 +435,6 @@ async def indexer_status():
         return StandardResponse(
             success=False,
             message=f"Failed to get indexer status: {str(e)}",
-            timestamp=datetime.now().isoformat()
-        )
-
-@app.get("/upload-status")
-async def check_any_files():
-    """Check if any file is already in the container."""
-    try:
-        blob_service = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
-        container_client = blob_service.get_container_client(CONTAINER_NAME)
-        
-        # Verify container exists
-        try:
-            container_client.get_container_properties()
-        except:
-            return StandardResponse(
-                success=False,
-                message="Container not found. Please upload a file first.",
-                timestamp=datetime.now().isoformat()
-            )
-        
-        # List all blobs
-        blobs = list(container_client.list_blobs())
-        if blobs:
-            filenames = [blob.name for blob in blobs]
-            return StandardResponse(
-                success=True,
-                message="Files found.",
-                data={"filenames": filenames},
-                timestamp=datetime.now().isoformat()
-            )
-        else:
-            return StandardResponse(
-                success=False,
-                message="No files found in the container.",
-                timestamp=datetime.now().isoformat()
-            )
-    except Exception as e:
-        logger.error(f"Check file status error: {str(e)}")
-        return StandardResponse(
-            success=False,
-            message=f"Error checking file status: {str(e)}",
             timestamp=datetime.now().isoformat()
         )
 
@@ -651,7 +613,7 @@ async def chat(prompt: str):
 
         # Create system message with the PDF content
         system_message = """You are an AI assistant that helps answer questions based on PDF documents.
-Answer based ONLY on the content in the documents provided below. and check liskt will be provided
+Answer based ONLY on the content in the documents provided below.
 If the information isn't in the documents, clearly state that.
 
 Here is the content from the uploaded PDF documents:
@@ -718,21 +680,4 @@ if __name__ == "__main__":
     logger.info(f"Starting FastAPI server on {host}:{port}...")
     logger.info(f"Visit http://{host}:{port}/docs for API documentation")
   
-    # Add enhanced error handling for Azure deployment
-    try:
-        # Get port from environment variable provided by Azure App Service
-        port = int(os.environ.get('PORT', 5000))
-        # Add logging for Azure diagnostics
-        if __name__ == '__main__':
-            logging.basicConfig(
-                level=logging.INFO,
-                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            app.run(host='0.0.0.0', port=port)
-    except Exception as e:
-        logging.error(f"Startup error: {str(e)}")
-        # Log additional environment info for debugging in Azure
-        logging.error(f"Python version: {sys.version}")
-        logging.error(f"Working directory: {os.getcwd()}")
-        # Re-raise to ensure Azure can capture the error
-        raise
+    uvicorn.run(app, host=host, port=port)
