@@ -720,7 +720,19 @@ if __name__ == "__main__":
   
     # Add enhanced error handling for Azure deployment
     try:
-        uvicorn.run(app, host=host, port=port)
+        # Get port from environment variable provided by Azure App Service
+        port = int(os.environ.get('PORT', 5000))
+        # Add logging for Azure diagnostics
+        if __name__ == '__main__':
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            app.run(host='0.0.0.0', port=port)
     except Exception as e:
-        logger.critical(f"Failed to start server: {str(e)}")
+        logging.error(f"Startup error: {str(e)}")
+        # Log additional environment info for debugging in Azure
+        logging.error(f"Python version: {sys.version}")
+        logging.error(f"Working directory: {os.getcwd()}")
+        # Re-raise to ensure Azure can capture the error
         raise

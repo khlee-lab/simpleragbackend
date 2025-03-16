@@ -1,6 +1,6 @@
 fastapi
 uvicorn
-gunicorn
+gunicorn>=20.1.0
 python-multipart>=0.0.6
 azure-storage-blob>=12.16.0
 azure-search-documents>=11.4.0
