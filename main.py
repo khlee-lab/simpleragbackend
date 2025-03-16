@@ -718,4 +718,9 @@ if __name__ == "__main__":
     logger.info(f"Starting FastAPI server on {host}:{port}...")
     logger.info(f"Visit http://{host}:{port}/docs for API documentation")
   
-    uvicorn.run(app, host=host, port=port)
+    # Add enhanced error handling for Azure deployment
+    try:
+        uvicorn.run(app, host=host, port=port)
+    except Exception as e:
+        logger.critical(f"Failed to start server: {str(e)}")
+        raise
