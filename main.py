@@ -43,7 +43,6 @@ class StandardResponse(BaseModel):
     data: Optional[Any] = None
     timestamp: str
 
-# Create the FastAPI app (single instance)
 app = FastAPI()
 
 # Configure CORS
