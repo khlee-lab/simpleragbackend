@@ -437,7 +437,46 @@ async def indexer_status():
             message=f"Failed to get indexer status: {str(e)}",
             timestamp=datetime.now().isoformat()
         )
-
+@app.get("/upload-status")
+async def check_any_files():
+    """Check if any file is already in the container."""
+    try:
+        blob_service = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
+        container_client = blob_service.get_container_client(CONTAINER_NAME)
+        
+        # Verify container exists
+        try:
+            container_client.get_container_properties()
+        except:
+            return StandardResponse(
+                success=False,
+                message="Container not found. Please upload a file first.",
+                timestamp=datetime.now().isoformat()
+            )
+        
+        # List all blobs
+        blobs = list(container_client.list_blobs())
+        if blobs:
+            filenames = [blob.name for blob in blobs]
+            return StandardResponse(
+                success=True,
+                message="Files found.",
+                data={"filenames": filenames},
+                timestamp=datetime.now().isoformat()
+            )
+        else:
+            return StandardResponse(
+                success=False,
+                message="No files found in the container.",
+                timestamp=datetime.now().isoformat()
+            )
+    except Exception as e:
+        logger.error(f"Check file status error: {str(e)}")
+        return StandardResponse(
+            success=False,
+            message=f"Error checking file status: {str(e)}",
+            timestamp=datetime.now().isoformat()
+        )
 def search_pdf_content(query: str, top_k=3) -> dict:
     """Query Azure Search index for relevant PDF content and return structured results."""
     try:
