@@ -439,8 +439,8 @@ async def indexer_status():
         )
 
 @app.get("/upload-status")
-async def check_file_status(filename: str):
-    """Check if a file with the given filename has been uploaded."""
+async def check_any_files():
+    """Check if any file is already in the container."""
     try:
         blob_service = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
         container_client = blob_service.get_container_client(CONTAINER_NAME)
@@ -455,23 +455,22 @@ async def check_file_status(filename: str):
                 timestamp=datetime.now().isoformat()
             )
         
-        # Check if file blob exists
-        blobs = container_client.list_blobs()
-        for blob in blobs:
-            if blob.name == filename:
-                return StandardResponse(
-                    success=True,
-                    message="File found.",
-                    data={"filename": filename},
-                    timestamp=datetime.now().isoformat()
-                )
-        
-        return StandardResponse(
-            success=False,
-            message="File not found.",
-            data={"filename": filename},
-            timestamp=datetime.now().isoformat()
-        )
+        # List all blobs
+        blobs = list(container_client.list_blobs())
+        if blobs:
+            filenames = [blob.name for blob in blobs]
+            return StandardResponse(
+                success=True,
+                message="Files found.",
+                data={"filenames": filenames},
+                timestamp=datetime.now().isoformat()
+            )
+        else:
+            return StandardResponse(
+                success=False,
+                message="No files found in the container.",
+                timestamp=datetime.now().isoformat()
+            )
     except Exception as e:
         logger.error(f"Check file status error: {str(e)}")
         return StandardResponse(
