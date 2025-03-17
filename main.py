@@ -731,7 +731,8 @@ Here is the content from the uploaded PDF documents:
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    """Lightweight health check endpoint for Azure's HTTP probes."""
+    return {"status": "healthy", "service": "simplerag"}
 
 if __name__ == "__main__":
     # Get port from environment variable or use default
