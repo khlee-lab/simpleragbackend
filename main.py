@@ -294,11 +294,6 @@ def get_indexer_status():
 # FastAPI 앱 생성
 app = FastAPI()
 
-# Import and use the health check 
-from healthcheck import verify_app_health
-
-# Assuming you have a FastAPI app instance called "app"
-app = verify_app_health(app)
 
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
