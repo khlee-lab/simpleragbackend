@@ -18,6 +18,14 @@ echo "Current directory: $(pwd)"
 echo "Directory contents:"
 ls
 
+# Extract application code if archive exists
+if [ -f "output.tar.gz" ]; then
+    echo "Extracting application from output.tar.gz..."
+    tar -xzf output.tar.gz
+    echo "Extraction complete. Updated directory contents:"
+    ls
+fi
+
 # Start the application using Gunicorn with proper settings for Azure
 echo "Starting Gunicorn server..."
 gunicorn --bind=0.0.0.0:$PORT \
