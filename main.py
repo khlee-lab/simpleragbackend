@@ -734,7 +734,7 @@ Here is the content from the uploaded PDF documents:
 if __name__ == "__main__":
     # Get port from environment variable or use default
     port = int(os.environ.get("PORT", 8000))
-    host = os.environ.get("HOST", "localhost")
+    host = os.environ.get("HOST", "0.0.0.0")
     
     logger.info(f"Starting FastAPI server on {host}:{port}...")
     logger.info(f"Visit http://{host}:{port}/docs for API documentation")
