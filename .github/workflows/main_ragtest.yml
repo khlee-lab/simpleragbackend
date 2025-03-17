@@ -68,4 +68,4 @@ jobs:
         with:
           app-name: 'ragtest'
           slot-name: 'Production'
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_0D192D11F5B444618ADE0585EE6A59CB }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_5A5955CDB0E44D23BFF72D9B3ACFBEB3 }}
