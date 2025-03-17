@@ -55,11 +55,5 @@ else
 fi
 
 # Start the application using Gunicorn with proper settings for Azure
-echo "Starting Gunicorn server with $APP_MODULE..."
-gunicorn --bind=0.0.0.0:$PORT \
-         --workers=4 \
-         --timeout=120 \
-         --access-logfile=- \
-         --error-logfile=- \
-         --log-level=info \
-         $APP_MODULE
+echo "Starting app..."
+gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app
