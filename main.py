@@ -729,7 +729,9 @@ Here is the content from the uploaded PDF documents:
             timestamp=datetime.now().isoformat()
         )
 
-
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
 
 if __name__ == "__main__":
     # Get port from environment variable or use default

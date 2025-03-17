@@ -13,6 +13,11 @@ pip install -r requirements.txt
 export PORT=${PORT:-8000}
 echo "Setting up application on port $PORT"
 
+cd /home/site/wwwroot
+echo "Current directory: $(pwd)"
+echo "Directory contents:"
+ls
+
 # Start the application using Gunicorn with proper settings for Azure
 echo "Starting Gunicorn server..."
 gunicorn --bind=0.0.0.0:$PORT \
