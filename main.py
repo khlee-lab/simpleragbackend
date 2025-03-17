@@ -43,7 +43,10 @@ class StandardResponse(BaseModel):
     data: Optional[Any] = None
     timestamp: str
 
-app = FastAPI()
+app = FastAPI(
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
 
 # Configure CORS
 app.add_middleware(
