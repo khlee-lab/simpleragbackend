@@ -62,6 +62,15 @@ else
     echo "No .env file found, using system environment variables"
 fi
 
+# Check required environment variables
+REQUIRED_VARS=("AZURE_STORAGE_CONNECTION_STRING" "AZURE_SEARCH_ENDPOINT" "AZURE_SEARCH_KEY" "AZURE_OPENAI_API_ENDPOINT" "AZURE_OPENAI_API_KEY" "AZURE_OPENAI_MODEL_NAME" "CONTAINER_NAME")
+for VAR in "${REQUIRED_VARS[@]}"; do
+    if [ -z "${!VAR}" ]; then
+        echo "ERROR: Required environment variable $VAR is not set."
+        exit 1
+    fi
+done
+
 # Use the PORT environment variable provided by Azure or default to 8000
 export PORT=${PORT:-8000}
 echo "Setting up application on port $PORT"
