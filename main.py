@@ -43,6 +43,7 @@ class StandardResponse(BaseModel):
     data: Optional[Any] = None
     timestamp: str
 
+# Create a single FastAPI app instance
 app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
@@ -72,19 +73,22 @@ AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION")
 AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_MODEL_NAME = os.environ.get("AZURE_OPENAI_MODEL_NAME")
 
-# Check for required environment variables
+# Check for required environment variables at startup
 required_env_vars = {
     "AZURE_STORAGE_CONNECTION_STRING": AZURE_STORAGE_CONNECTION_STRING,
     "AZURE_SEARCH_ENDPOINT": AZURE_SEARCH_ENDPOINT,
     "AZURE_SEARCH_KEY": AZURE_SEARCH_KEY,
     "AZURE_OPENAI_API_ENDPOINT": AZURE_OPENAI_API_ENDPOINT,
-    "AZURE_OPENAI_API_KEY": AZURE_OPENAI_API_KEY
+    "AZURE_OPENAI_API_KEY": AZURE_OPENAI_API_KEY,
+    "AZURE_OPENAI_MODEL_NAME": AZURE_OPENAI_MODEL_NAME,
+    "CONTAINER_NAME": CONTAINER_NAME
 }
 
 missing_vars = [var for var, value in required_env_vars.items() if not value]
 if missing_vars:
-    logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-    logger.error("Please set these environment variables before running the application.")
+    missing = ', '.join(missing_vars)
+    logger.error(f"Missing required environment variables: {missing}")
+    raise RuntimeError(f"Missing required environment variables: {missing}")
 
 # Configure OpenAI client (only if credentials are available)
 if AZURE_OPENAI_API_KEY and AZURE_OPENAI_API_ENDPOINT:
@@ -293,10 +297,6 @@ def get_indexer_status():
     except Exception as e:
         logger.error(f"Unexpected error in get_indexer_status: {str(e)}")
         return f"error: {str(e)}"
-
-# FastAPI 앱 생성
-app = FastAPI()
-
 
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):

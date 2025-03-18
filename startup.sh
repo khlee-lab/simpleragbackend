@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Make sure this file has LF line endings (not CRLF)
+# In Linux, ensure this file is executable with: chmod +x startup.sh
+
 # Enable error logging
 set -e
 echo "Starting application setup..."
@@ -48,6 +51,15 @@ else
         echo "Found requirements at: $REQUIREMENTS_PATH"
         pip install -r "$REQUIREMENTS_PATH"
     fi
+fi
+
+# Handle environment variables
+if [ -f ".env" ]; then
+    echo "Loading environment from .env file"
+    # Note: Pure bash way to load .env without requiring additional tools
+    export $(grep -v '^#' .env | xargs)
+else
+    echo "No .env file found, using system environment variables"
 fi
 
 # Use the PORT environment variable provided by Azure or default to 8000
