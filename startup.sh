@@ -7,29 +7,16 @@
 set -e
 echo "Starting application setup..."
 
-# Set working directory - check common locations
-APP_HOME="/home/site/wwwroot"
-if [ -d "/home/site/wwwroot" ]; then
-    # Standard Azure App Service location
+# Azure App Serviceが既に展開済みの場合、そのパスを使用
+if [ -n "$ORYX_APP_PATH" ]; then
+    APP_HOME="$ORYX_APP_PATH"
+    echo "Using Oryx provided app path: $APP_HOME"
+elif [ -d "/home/site/wwwroot" ]; then
     APP_HOME="/home/site/wwwroot"
     echo "Using standard Azure App Service location: $APP_HOME"
-elif [ -d "/home/app" ]; then
-    APP_HOME="/home/app"
-    echo "Using /home/app directory"
 else
-    # Fallback to current directory
     APP_HOME=$(pwd)
     echo "Using current directory: $APP_HOME"
-fi
-
-# Extract the application code if tar.gz exists
-if [ -f "/home/site/wwwroot/output.tar.gz" ]; then
-    echo "Extracting application from output.tar.gz..."
-    mkdir -p /home/app
-    tar -xzf /home/site/wwwroot/output.tar.gz -C /home/app
-    APP_HOME="/home/app"
-    echo "Extraction complete. App directory contents:"
-    ls -la "$APP_HOME"
 fi
 
 # Navigate to app directory
