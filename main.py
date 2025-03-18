@@ -737,12 +737,12 @@ async def health():
     """Lightweight health check endpoint for Azure's HTTP probes."""
     return {"status": "healthy", "service": "simplerag"}
 
-if __name__ == "__main__":
-    # Get port from environment variable or use default
-    port = int(os.environ.get("PORT", 8000))
-    host = os.environ.get("HOST", "0.0.0.0")
+# if __name__ == "__main__":
+#     # Get port from environment variable or use default
+#     port = int(os.environ.get("PORT", 8000))
+#     host = os.environ.get("HOST", "0.0.0.0")
     
-    logger.info(f"Starting FastAPI server on {host}:{port}...")
-    logger.info(f"Visit http://{host}:{port}/docs for API documentation")
+#     logger.info(f"Starting FastAPI server on {host}:{port}...")
+#     logger.info(f"Visit http://{host}:{port}/docs for API documentation")
   
-    uvicorn.run(app, host=host, port=port)
+#     uvicorn.run(app, host=host, port=port)
