@@ -25,6 +25,15 @@ echo "Working directory: $(pwd)"
 echo "Directory contents:"
 ls -la
 
+# Extract output.tar.gz if present
+if [ -f "output.tar.gz" ]; then
+    echo "Extracting output.tar.gz..."
+    tar -xzf output.tar.gz
+    echo "Extraction complete."
+    echo "Directory contents after extraction:"
+    ls -la
+fi
+
 # Upgrade pip and install dependencies
 echo "Installing dependencies..."
 pip install --upgrade pip
@@ -37,6 +46,9 @@ else
     if [ ! -z "$REQUIREMENTS_PATH" ]; then
         echo "Found requirements at: $REQUIREMENTS_PATH"
         pip install -r "$REQUIREMENTS_PATH"
+    else
+        echo "ERROR: No requirements.txt found anywhere!"
+        exit 1
     fi
 fi
 
@@ -49,10 +61,10 @@ else
     echo "No .env file found, using system environment variables"
 fi
 
-# Check required environment variables
-REQUIRED_VARS=("AZURE_STORAGE_CONNECTION_STRING" "AZURE_SEARCH_ENDPOINT" "AZURE_SEARCH_KEY" "AZURE_OPENAI_API_ENDPOINT" "AZURE_OPENAI_API_KEY" "AZURE_OPENAI_MODEL_NAME" "CONTAINER_NAME")
-for VAR in "${REQUIRED_VARS[@]}"; do
-    if [ -z "${!VAR}" ]; then
+# Check required environment variables - FIX: Use space-separated list instead of array
+REQUIRED_VARS="AZURE_STORAGE_CONNECTION_STRING AZURE_SEARCH_ENDPOINT AZURE_SEARCH_KEY AZURE_OPENAI_API_ENDPOINT AZURE_OPENAI_API_KEY AZURE_OPENAI_MODEL_NAME CONTAINER_NAME"
+for VAR in $REQUIRED_VARS; do
+    if [ -z "$(eval echo \$$VAR)" ]; then
         echo "ERROR: Required environment variable $VAR is not set."
         exit 1
     fi
@@ -94,6 +106,9 @@ fi
 
 # Make sure Python files are executable
 chmod +x *.py 2>/dev/null || true
+
+# Ensure startup.sh is executable
+chmod +x *.sh 2>/dev/null || true
 
 # Start the application using Gunicorn with proper settings for Azure
 echo "Starting app with module: $APP_MODULE on port $PORT..."
