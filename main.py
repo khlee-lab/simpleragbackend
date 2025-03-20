@@ -279,28 +279,71 @@ def reset_search_resources():
         logger.error(f"Error resetting search resources: {str(e)}")
         return False
 
+# Azure Search 리소스를 완전히 삭제하고 다시 생성하는 함수
+def delete_and_recreate_search_resources():
+    try:
+        import requests
+        
+        # Common headers for all requests
+        headers = {
+            'Content-Type': 'application/json',
+            'api-key': AZURE_SEARCH_KEY
+        }
+        
+        # 1. Delete existing indexer if it exists
+        indexer_url = f"{AZURE_SEARCH_ENDPOINT}/indexers/{INDEXER_NAME}?api-version=2020-06-30"
+        try:
+            delete_response = requests.delete(indexer_url, headers=headers)
+            if delete_response.status_code == 204 or delete_response.status_code == 404:
+                logger.info(f"Indexer '{INDEXER_NAME}' deleted or did not exist")
+            else:
+                logger.warning(f"Failed to delete indexer: {delete_response.text}")
+        except Exception as e:
+            logger.warning(f"Error deleting indexer: {str(e)}")
+        
+        # 2. Delete existing index if it exists
+        index_url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{INDEX_NAME}?api-version=2020-06-30"
+        try:
+            delete_response = requests.delete(index_url, headers=headers)
+            if delete_response.status_code == 204 or delete_response.status_code == 404:
+                logger.info(f"Index '{INDEX_NAME}' deleted or did not exist")
+            else:
+                logger.warning(f"Failed to delete index: {delete_response.text}")
+        except Exception as e:
+            logger.warning(f"Error deleting index: {str(e)}")
+        
+        # 3. Delete existing data source if it exists
+        datasource_url = f"{AZURE_SEARCH_ENDPOINT}/datasources/{DATASOURCE_NAME}?api-version=2020-06-30"
+        try:
+            delete_response = requests.delete(datasource_url, headers=headers)
+            if delete_response.status_code == 204 or delete_response.status_code == 404:
+                logger.info(f"Data source '{DATASOURCE_NAME}' deleted or did not exist")
+            else:
+                logger.warning(f"Failed to delete data source: {delete_response.text}")
+        except Exception as e:
+            logger.warning(f"Error deleting data source: {str(e)}")
+        
+        # Add a small delay to ensure deletion is complete
+        time.sleep(5)
+        
+        # 4. Create new resources
+        return create_search_resources()
+        
+    except Exception as e:
+        logger.error(f"Error recreating search resources: {str(e)}")
+        return False
+
 # Azure Search Indexer를 재실행하는 함수
 def reset_and_run_indexer():
     try:
-        # 리소스 리셋 (인덱서와 인덱스 모두)
-        reset_result = reset_search_resources()
-        if not reset_result:
-            return "error: Failed to reset search resources"
+        # Delete and recreate all search resources
+        recreate_result = delete_and_recreate_search_resources()
+        if not recreate_result:
+            return "error: Failed to recreate search resources"
         
-        # 인덱서 클라이언트 생성
-        indexer_client = SearchIndexerClient(
-            endpoint=AZURE_SEARCH_ENDPOINT,
-            credential=AzureKeyCredential(AZURE_SEARCH_KEY)
-        )
-        
-        # 인덱서 즉시 재실행
-        indexer_client.run_indexer(INDEXER_NAME)
         return "running"
-    except HttpResponseError as e:
-        logger.error(f"Azure Search error: {str(e)}")
-        return f"error: {str(e)}"
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
+        logger.error(f"Unexpected error in reset_and_run_indexer: {str(e)}")
         return f"error: {str(e)}"
 
 # 인덱싱 상태를 확인하는 함수
@@ -366,66 +409,32 @@ async def upload_pdf(file: UploadFile = File(...)):
         content = await file.read()
         blob_client.upload_blob(content, overwrite=True)
 
-        # Explicitly reset and run indexer
+        # Delete and recreate search resources
         try:
-            # Reset both the indexer and index, then recreate resources
-            reset_result = reset_search_resources()
-            print(f"Reset and recreated search resources, result: {reset_result}")
+            # Delete and recreate all search resources
+            recreate_result = delete_and_recreate_search_resources()
+            logger.info(f"Deleted and recreated search resources, result: {recreate_result}")
             
-            if not reset_result:
+            if not recreate_result:
                 return StandardResponse(
                     success=False,
-                    message="Failed to reset search resources",
+                    message="Failed to recreate search resources",
                     timestamp=datetime.now().isoformat()
                 )
             
             # Add a small delay to ensure Azure services register the resources
-            time.sleep(3)
+            time.sleep(5)
             
-            # Verify indexer exists before attempting operations
-            indexer_client = SearchIndexerClient(
-                endpoint=AZURE_SEARCH_ENDPOINT,
-                credential=AzureKeyCredential(AZURE_SEARCH_KEY)
-            )
-            
-            # Implement retry logic for getting the indexer
-            max_retries = 3
-            retry_count = 0
-            indexer_status = "unknown"
-            
-            while retry_count < max_retries:
-                try:
-                    indexer = indexer_client.get_indexer(INDEXER_NAME)
-                    if indexer:
-                        print(f"Indexer {INDEXER_NAME} exists, running")
-                        # Run the indexer
-                        indexer_client.run_indexer(INDEXER_NAME)
-                        indexer_status = "running"
-                        break
-                    else:
-                        indexer_status = "error: Indexer exists but is invalid"
-                        retry_count += 1
-                        time.sleep(2)  # Wait before retrying
-                except ResourceNotFoundError:
-                    print(f"Retry {retry_count+1}: Indexer {INDEXER_NAME} not found, waiting...")
-                    retry_count += 1
-                    
-                    if retry_count >= max_retries:
-                        indexer_status = f"error: Indexer {INDEXER_NAME} not found after {max_retries} attempts"
-                    else:
-                        time.sleep(3)  # Wait before retrying
-                except Exception as e:
-                    print(f"Error with indexer operations: {str(e)}")
-                    indexer_status = f"error: {str(e)}"
-                    break
+            # Set indexer status
+            indexer_status = "created_and_running"
                 
         except Exception as e:
-            print(f"Error during indexer setup: {str(e)}")
+            logger.error(f"Error during search resource recreation: {str(e)}")
             indexer_status = f"error: {str(e)}"
             
         return StandardResponse(
             success=True,
-            message="파일 업로드 완료",
+            message="파일 업로드 완료 및 검색 리소스 재생성",
             data={"filename": file.filename, "indexer_status": indexer_status},
             timestamp=datetime.now().isoformat()
         )
