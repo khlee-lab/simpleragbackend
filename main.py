@@ -333,14 +333,51 @@ def delete_and_recreate_search_resources():
         logger.error(f"Error recreating search resources: {str(e)}")
         return False
 
-# Azure Search Indexer를 재실행하는 함수
+# Azure Search Indexer와 Index를 재설정하고 재생성하는 함수
 def reset_and_run_indexer():
     try:
-        # Delete and recreate all search resources
-        recreate_result = delete_and_recreate_search_resources()
+        logger.info("Starting to reset and recreate both index and indexer...")
+        
+        # 인덱서 및 인덱스 클라이언트 생성
+        indexer_client = SearchIndexerClient(
+            endpoint=AZURE_SEARCH_ENDPOINT,
+            credential=AzureKeyCredential(AZURE_SEARCH_KEY)
+        )
+        
+        index_client = SearchIndexClient(
+            endpoint=AZURE_SEARCH_ENDPOINT,
+            credential=AzureKeyCredential(AZURE_SEARCH_KEY)
+        )
+        
+        # 1. 인덱서 삭제 시도
+        try:
+            logger.info(f"Attempting to delete indexer '{INDEXER_NAME}'...")
+            indexer_client.delete_indexer(INDEXER_NAME)
+            logger.info(f"Indexer '{INDEXER_NAME}' deleted successfully")
+        except ResourceNotFoundError:
+            logger.info(f"Indexer '{INDEXER_NAME}' not found, no need to delete")
+        except Exception as e:
+            logger.warning(f"Error deleting indexer: {str(e)}")
+        
+        # 2. 인덱스 삭제 시도
+        try:
+            logger.info(f"Attempting to delete index '{INDEX_NAME}'...")
+            index_client.delete_index(INDEX_NAME)
+            logger.info(f"Index '{INDEX_NAME}' deleted successfully")
+        except ResourceNotFoundError:
+            logger.info(f"Index '{INDEX_NAME}' not found, no need to delete")
+        except Exception as e:
+            logger.warning(f"Error deleting index: {str(e)}")
+        
+        # 3. 리소스 재생성
+        logger.info("Recreating search resources (datasource, index, and indexer)...")
+        recreate_result = create_search_resources()
+        
         if not recreate_result:
+            logger.error("Failed to recreate search resources")
             return "error: Failed to recreate search resources"
         
+        logger.info("Successfully reset and recreated both index and indexer")
         return "running"
     except Exception as e:
         logger.error(f"Unexpected error in reset_and_run_indexer: {str(e)}")
