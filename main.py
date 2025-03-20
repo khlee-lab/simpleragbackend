@@ -238,8 +238,8 @@ def create_search_resources():
         print(f"Error creating search resources: {str(e)}")
         return False
 
-# Azure Search Indexer를 재실행하는 함수
-def reset_and_run_indexer():
+# Azure Search Indexer와 Index를 재설정하는 함수
+def reset_search_resources():
     try:
         # 인덱서 클라이언트 생성
         indexer_client = SearchIndexerClient(
@@ -247,24 +247,60 @@ def reset_and_run_indexer():
             credential=AzureKeyCredential(AZURE_SEARCH_KEY)
         )
         
-        # 필요한 리소스 생성 확인
-        try:
-            # Use the correct indexer name as defined in our constants
-            indexer_client.get_indexer(INDEXER_NAME)
-        except ResourceNotFoundError:
-            # 인덱서가 없으면 필요한 리소스 생성
-            create_search_resources()
+        # 인덱스 클라이언트 생성
+        index_client = SearchIndexClient(
+            endpoint=AZURE_SEARCH_ENDPOINT,
+            credential=AzureKeyCredential(AZURE_SEARCH_KEY)
+        )
         
-        # 인덱서를 리셋(기존 데이터 삭제 후 다시 시작)
-        indexer_client.reset_indexer(INDEXER_NAME)
+        # 1. 인덱서 리셋
+        try:
+            indexer_client.reset_indexer(INDEXER_NAME)
+            logger.info(f"Indexer '{INDEXER_NAME}' reset successfully")
+        except ResourceNotFoundError:
+            logger.info(f"Indexer '{INDEXER_NAME}' not found, will be created")
+        except Exception as e:
+            logger.error(f"Error resetting indexer: {str(e)}")
+        
+        # 2. 인덱스 내용 비우기 (인덱스를 삭제하고 다시 생성)
+        try:
+            # 기존 인덱스 삭제 시도
+            index_client.delete_index(INDEX_NAME)
+            logger.info(f"Index '{INDEX_NAME}' deleted successfully")
+        except ResourceNotFoundError:
+            logger.info(f"Index '{INDEX_NAME}' not found, will be created")
+        except Exception as e:
+            logger.error(f"Error deleting index: {str(e)}")
+        
+        # 필요한 리소스 재생성
+        return create_search_resources()
+        
+    except Exception as e:
+        logger.error(f"Error resetting search resources: {str(e)}")
+        return False
+
+# Azure Search Indexer를 재실행하는 함수
+def reset_and_run_indexer():
+    try:
+        # 리소스 리셋 (인덱서와 인덱스 모두)
+        reset_result = reset_search_resources()
+        if not reset_result:
+            return "error: Failed to reset search resources"
+        
+        # 인덱서 클라이언트 생성
+        indexer_client = SearchIndexerClient(
+            endpoint=AZURE_SEARCH_ENDPOINT,
+            credential=AzureKeyCredential(AZURE_SEARCH_KEY)
+        )
+        
         # 인덱서 즉시 재실행
         indexer_client.run_indexer(INDEXER_NAME)
         return "running"
     except HttpResponseError as e:
-        print(f"Azure Search error: {str(e)}")
+        logger.error(f"Azure Search error: {str(e)}")
         return f"error: {str(e)}"
     except Exception as e:
-        print(f"Unexpected error: {str(e)}")
+        logger.error(f"Unexpected error: {str(e)}")
         return f"error: {str(e)}"
 
 # 인덱싱 상태를 확인하는 함수
@@ -332,14 +368,14 @@ async def upload_pdf(file: UploadFile = File(...)):
 
         # Explicitly reset and run indexer
         try:
-            # Always create search resources first
-            create_result = create_search_resources()
-            print(f"Created search resources, result: {create_result}")
+            # Reset both the indexer and index, then recreate resources
+            reset_result = reset_search_resources()
+            print(f"Reset and recreated search resources, result: {reset_result}")
             
-            if not create_result:
+            if not reset_result:
                 return StandardResponse(
                     success=False,
-                    message="Failed to create search resources",
+                    message="Failed to reset search resources",
                     timestamp=datetime.now().isoformat()
                 )
             
@@ -361,9 +397,8 @@ async def upload_pdf(file: UploadFile = File(...)):
                 try:
                     indexer = indexer_client.get_indexer(INDEXER_NAME)
                     if indexer:
-                        print(f"Indexer {INDEXER_NAME} exists, resetting and running")
-                        # Reset and run the indexer
-                        indexer_client.reset_indexer(INDEXER_NAME)
+                        print(f"Indexer {INDEXER_NAME} exists, running")
+                        # Run the indexer
                         indexer_client.run_indexer(INDEXER_NAME)
                         indexer_status = "running"
                         break
