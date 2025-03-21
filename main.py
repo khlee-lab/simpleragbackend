@@ -176,7 +176,7 @@ class AzureSearchManager:
             credential=AzureKeyCredential(self.api_key)
         )
 
-    def delete_search_resources(self) -> (bool, List[str]):
+    def delete_search_resources(self) -> tuple[bool, List[str]]:
         """
         データソース・インデクサ・インデックスを削除。
         戻り値：(成功フラグ, エラー内容リスト)
