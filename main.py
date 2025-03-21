@@ -552,9 +552,20 @@ def force_delete_search_resources():
         logger.error(f"Error in force_delete_search_resources: {str(e)}")
         return False
 
-@app.post("/reset-search")
+@app.post("/reset-search", response_model=StandardResponse, summary="Reset Search Index and Indexer", tags=["Search Management"])
 async def reset_search_endpoint():
-    """Endpoint to completely delete and recreate the search index and indexer."""
+    """
+    Reset both Azure Cognitive Search index and indexer.
+    
+    This endpoint will:
+    - Delete the existing indexer
+    - Delete the existing index
+    - Delete the existing data source
+    - Recreate all resources from scratch
+    
+    Returns:
+        StandardResponse: A standardized response object with success/failure status
+    """
     try:
         logger.info("API request received to reset search resources (index and indexer)")
         
@@ -708,7 +719,7 @@ async def indexer_status():
         status = get_indexer_status()
 
         # If the indexer status is "reset", trigger the indexer to run immediately.
-        if status == "reset":
+        if (status == "reset"):
             try:
                 indexer_client = SearchIndexerClient(
                     endpoint=AZURE_SEARCH_ENDPOINT,
