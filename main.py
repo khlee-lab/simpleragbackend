@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from typing import Any, Dict, List, Optional, Union
 import os
 import logging
+import requests
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
