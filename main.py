@@ -3,6 +3,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from azure.storage.blob import BlobServiceClient
 from azure.core.credentials import AzureKeyCredential
+# 最新バージョンの Azure AI Search SDK をインポート
 from azure.search.documents.indexes import SearchIndexerClient, SearchIndexClient
 from azure.search.documents.indexes.models import (
     SearchIndexer,
@@ -11,12 +12,15 @@ from azure.search.documents.indexes.models import (
     SearchIndexerDataSourceConnection,
     SearchFieldDataType,
     SimpleField,
-    SearchableField
+    SearchableField,
+    VectorSearch,  # 新しいベクトル検索機能のサポート
+    SemanticSearch  # 新しいセマンティック検索機能のサポート
 )
 from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 import openai
 from openai import AzureOpenAI
 import time
+import asyncio
 from azure.search.documents import SearchClient
 from datetime import datetime
 from pydantic import BaseModel
@@ -67,6 +71,8 @@ AZURE_SEARCH_KEY = os.environ.get("AZURE_SEARCH_KEY")
 INDEX_NAME = os.environ.get("INDEX_NAME", "azureblob-index")
 DATASOURCE_NAME = os.environ.get("DATASOURCE_NAME", "simplerag")
 INDEXER_NAME = os.environ.get("INDEXER_NAME", "azureblob-indexer")
+# Azure Search API バージョンを最新に更新
+AZURE_SEARCH_API_VERSION = "2024-07-01"
 
 # Azure OpenAI configuration
 AZURE_OPENAI_API_ENDPOINT = os.environ.get("AZURE_OPENAI_API_ENDPOINT")
@@ -98,7 +104,7 @@ if AZURE_OPENAI_API_KEY and AZURE_OPENAI_API_ENDPOINT:
     openai.api_version = AZURE_OPENAI_API_VERSION
     openai.api_key = AZURE_OPENAI_API_KEY
 
-# Blob의 기존 PDF 삭제 함수
+# Blobの既存 PDF 削除関数
 def delete_existing_pdfs():
     try:
         blob_service = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
@@ -112,7 +118,7 @@ def delete_existing_pdfs():
         logger.error(f"Error deleting PDFs: {str(e)}")
         return False
 
-# Azure Search 리소스 생성 함수
+# Azure Search リソース生成関数
 def create_search_resources():
     try:
         import requests
@@ -124,7 +130,7 @@ def create_search_resources():
         }
         
         # 1. Create data source if not exists
-        data_source_url = f"{AZURE_SEARCH_ENDPOINT}/datasources/{DATASOURCE_NAME}?api-version=2020-06-30"
+        data_source_url = f"{AZURE_SEARCH_ENDPOINT}/datasources/{DATASOURCE_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
         data_source_body = {
             "name": DATASOURCE_NAME,
             "type": "azureblob",
@@ -140,14 +146,14 @@ def create_search_resources():
         try:
             ds_response = requests.put(data_source_url, headers=headers, json=data_source_body)
             ds_response.raise_for_status()
-            print(f"Data source '{DATASOURCE_NAME}' created or updated")
+            logger.info(f"Data source '{DATASOURCE_NAME}' created or updated")
             data_source_created = True
         except Exception as e:
-            print(f"Error creating data source: {str(e)}")
+            logger.error(f"Error creating data source: {str(e)}")
             return False
         
-        # 2. Create index if not exists
-        index_url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{INDEX_NAME}?api-version=2020-06-30"
+        # 2. Create index if not exists - 最新バージョンに対応したフィールド定義
+        index_url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{INDEX_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
         index_body = {
             "name": INDEX_NAME,
             "fields": [
@@ -168,7 +174,8 @@ def create_search_resources():
                     "filterable": False,
                     "sortable": False,
                     "facetable": False,
-                    "retrievable": True
+                    "retrievable": True,
+                    "analyzer": "standard.lucene"  # 明示的にアナライザーを指定
                 },
                 {
                     "name": "metadata_storage_name",
@@ -182,21 +189,38 @@ def create_search_resources():
                     "searchable": False,
                     "retrievable": True
                 }
-            ]
+            ],
+            # セマンティック検索のための基本設定を追加（オプション）
+            "semantic": {
+                "configurations": [
+                    {
+                        "name": "default",
+                        "prioritizedFields": {
+                            "titleField": None,
+                            "contentFields": [
+                                {
+                                    "fieldName": "content"
+                                }
+                            ],
+                            "keywordsFields": []
+                        }
+                    }
+                ]
+            }
         }
         
         index_created = False
         try:
             idx_response = requests.put(index_url, headers=headers, json=index_body)
             idx_response.raise_for_status()
-            print(f"Index '{INDEX_NAME}' created or updated")
+            logger.info(f"Index '{INDEX_NAME}' created or updated")
             index_created = True
         except Exception as e:
-            print(f"Error creating index: {str(e)}")
+            logger.error(f"Error creating index: {str(e)}")
             return False
         
-        # 3. Create indexer if not exists
-        indexer_url = f"{AZURE_SEARCH_ENDPOINT}/indexers/{INDEXER_NAME}?api-version=2020-06-30"
+        # 3. Create indexer if not exists - 最新バージョン対応
+        indexer_url = f"{AZURE_SEARCH_ENDPOINT}/indexers/{INDEXER_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
         indexer_body = {
             "name": INDEXER_NAME,
             "dataSourceName": DATASOURCE_NAME,
@@ -206,37 +230,47 @@ def create_search_resources():
                     "parsingMode": "default",
                     "dataToExtract": "contentAndMetadata"
                 }
-            }
+            },
+            # PDF のテキスト抽出処理を最適化するための設定
+            "fieldMappings": [
+                {
+                    "sourceFieldName": "metadata_storage_path",
+                    "targetFieldName": "metadata_storage_path",
+                    "mappingFunction": {
+                        "name": "base64Encode"
+                    }
+                }
+            ]
         }
         
         indexer_created = False
         try:
             idx_response = requests.put(indexer_url, headers=headers, json=indexer_body)
             idx_response.raise_for_status()
-            print(f"Indexer '{INDEXER_NAME}' created or updated")
+            logger.info(f"Indexer '{INDEXER_NAME}' created or updated")
             indexer_created = True
             # Small delay to ensure registration
             time.sleep(2)
         except Exception as e:
-            print(f"Error creating indexer: {str(e)}")
+            logger.error(f"Error creating indexer: {str(e)}")
             return False
         
         # Run the indexer immediately
         if indexer_created:
             try:
-                run_url = f"{AZURE_SEARCH_ENDPOINT}/indexers/{INDEXER_NAME}/run?api-version=2020-06-30"
+                run_url = f"{AZURE_SEARCH_ENDPOINT}/indexers/{INDEXER_NAME}/run?api-version={AZURE_SEARCH_API_VERSION}"
                 run_response = requests.post(run_url, headers=headers)
                 run_response.raise_for_status()
-                print(f"Indexer '{INDEXER_NAME}' triggered to run")
+                logger.info(f"Indexer '{INDEXER_NAME}' triggered to run")
             except Exception as e:
-                print(f"Error running indexer: {str(e)}, but resources were created")
+                logger.error(f"Error running indexer: {str(e)}, but resources were created")
                 # Don't fail here as resources are created, just indexer run failed
         
         # If we've gotten this far, all resources are created
         return data_source_created and index_created and indexer_created
         
     except Exception as e:
-        print(f"Error creating search resources: {str(e)}")
+        logger.error(f"Error creating search resources: {str(e)}")
         return False
 
 # Azure Search Indexer와 Index를 재설정하는 함수
@@ -280,8 +314,87 @@ def reset_search_resources():
         logger.error(f"Error resetting search resources: {str(e)}")
         return False
 
-# Azure Search 리소스를 완전히 삭제하고 다시 생성하는 함수
-def delete_and_recreate_search_resources():
+# Azure Search リソースの削除を行う共通処理
+def delete_search_resources(log_prefix=""):
+    """
+    Azure Search リソース（インデクサー、インデックス、データソース）を削除する共通処理
+    
+    Args:
+        log_prefix (str): ログメッセージの接頭辞
+    
+    Returns:
+        tuple: (bool, list) - 成功したかどうかのフラグとエラーメッセージのリスト
+    """
+    try:
+        import requests
+        errors = []
+        
+        # Common headers for all requests
+        headers = {
+            'Content-Type': 'application/json',
+            'api-key': AZURE_SEARCH_KEY
+        }
+        
+        logger.info(f"{log_prefix}Starting deletion of search resources")
+        
+        # 1. Delete indexer - API バージョンを最新に更新
+        indexer_url = f"{AZURE_SEARCH_ENDPOINT}/indexers/{INDEXER_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
+        try:
+            delete_response = requests.delete(indexer_url, headers=headers)
+            if delete_response.status_code in [204, 404]:
+                logger.info(f"{log_prefix}Indexer '{INDEXER_NAME}' deleted or did not exist")
+            else:
+                error_msg = f"Failed to delete indexer: {delete_response.status_code} - {delete_response.text}"
+                logger.warning(f"{log_prefix}{error_msg}")
+                errors.append(error_msg)
+        except Exception as e:
+            error_msg = f"Exception when deleting indexer: {str(e)}"
+            logger.warning(f"{log_prefix}{error_msg}")
+            errors.append(error_msg)
+        
+        # 2. Delete index - API バージョンを最新に更新
+        index_url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{INDEX_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
+        try:
+            delete_response = requests.delete(index_url, headers=headers)
+            if delete_response.status_code in [204, 404]:
+                logger.info(f"{log_prefix}Index '{INDEX_NAME}' deleted or did not exist")
+            else:
+                error_msg = f"Failed to delete index: {delete_response.status_code} - {delete_response.text}"
+                logger.warning(f"{log_prefix}{error_msg}")
+                errors.append(error_msg)
+        except Exception as e:
+            error_msg = f"Exception when deleting index: {str(e)}"
+            logger.warning(f"{log_prefix}{error_msg}")
+            errors.append(error_msg)
+        
+        # 3. Delete data source - API バージョンを最新に更新 
+        datasource_url = f"{AZURE_SEARCH_ENDPOINT}/datasources/{DATASOURCE_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
+        try:
+            delete_response = requests.delete(datasource_url, headers=headers)
+            if delete_response.status_code in [204, 404]:
+                logger.info(f"{log_prefix}Data source '{DATASOURCE_NAME}' deleted or did not exist")
+            else:
+                error_msg = f"Failed to delete data source: {delete_response.status_code} - {delete_response.text}"
+                logger.warning(f"{log_prefix}{error_msg}")
+                errors.append(error_msg)
+        except Exception as e:
+            error_msg = f"Exception when deleting data source: {str(e)}"
+            logger.warning(f"{log_prefix}{error_msg}")
+            errors.append(error_msg)
+        
+        return (len(errors) == 0, errors)
+    except Exception as e:
+        logger.error(f"{log_prefix}Unexpected error in delete_search_resources: {str(e)}")
+        return (False, [f"Unexpected error: {str(e)}"])
+
+# ヘルパー関数: リソースが確実に削除されたか確認する
+def confirm_resources_deleted():
+    """
+    Azure Search リソースが実際に削除されたことを確認する
+    
+    Returns:
+        bool: すべてのリソースが削除されていれば True
+    """
     try:
         import requests
         
@@ -291,96 +404,62 @@ def delete_and_recreate_search_resources():
             'api-key': AZURE_SEARCH_KEY
         }
         
-        # 1. Delete existing indexer if it exists
-        indexer_url = f"{AZURE_SEARCH_ENDPOINT}/indexers/{INDEXER_NAME}?api-version=2020-06-30"
-        try:
-            delete_response = requests.delete(indexer_url, headers=headers)
-            if delete_response.status_code == 204 or delete_response.status_code == 404:
-                logger.info(f"Indexer '{INDEXER_NAME}' deleted or did not exist")
-            else:
-                logger.warning(f"Failed to delete indexer: {delete_response.text}")
-        except Exception as e:
-            logger.warning(f"Error deleting indexer: {str(e)}")
+        all_deleted = True
         
-        # 2. Delete existing index if it exists
-        index_url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{INDEX_NAME}?api-version=2020-06-30"
-        try:
-            delete_response = requests.delete(index_url, headers=headers)
-            if delete_response.status_code == 204 or delete_response.status_code == 404:
-                logger.info(f"Index '{INDEX_NAME}' deleted or did not exist")
-            else:
-                logger.warning(f"Failed to delete index: {delete_response.text}")
-        except Exception as e:
-            logger.warning(f"Error deleting index: {str(e)}")
+        # API バージョンを最新に更新
+        # Check indexer
+        indexer_url = f"{AZURE_SEARCH_ENDPOINT}/indexers/{INDEXER_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
+        check_response = requests.get(indexer_url, headers=headers)
+        if check_response.status_code == 200:
+            logger.warning(f"Indexer '{INDEXER_NAME}' still exists after deletion attempt")
+            all_deleted = False
         
-        # 3. Delete existing data source if it exists
-        datasource_url = f"{AZURE_SEARCH_ENDPOINT}/datasources/{DATASOURCE_NAME}?api-version=2020-06-30"
-        try:
-            delete_response = requests.delete(datasource_url, headers=headers)
-            if delete_response.status_code == 204 or delete_response.status_code == 404:
-                logger.info(f"Data source '{DATASOURCE_NAME}' deleted or did not exist")
-            else:
-                logger.warning(f"Failed to delete data source: {delete_response.text}")
-        except Exception as e:
-            logger.warning(f"Error deleting data source: {str(e)}")
+        # Check index
+        index_url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{INDEX_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
+        check_response = requests.get(index_url, headers=headers)
+        if check_response.status_code == 200:
+            logger.warning(f"Index '{INDEX_NAME}' still exists after deletion attempt")
+            all_deleted = False
         
-        # Add a small delay to ensure deletion is complete
-        time.sleep(5)
+        # Check data source
+        datasource_url = f"{AZURE_SEARCH_ENDPOINT}/datasources/{DATASOURCE_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
+        check_response = requests.get(datasource_url, headers=headers)
+        if check_response.status_code == 200:
+            logger.warning(f"Data source '{DATASOURCE_NAME}' still exists after deletion attempt")
+            all_deleted = False
         
-        # 4. Create new resources
-        return create_search_resources()
-        
+        return all_deleted
     except Exception as e:
-        logger.error(f"Error recreating search resources: {str(e)}")
+        logger.error(f"Error in confirm_resources_deleted: {str(e)}")
         return False
 
-# Azure Search Indexer와 Index를 확실히 재설정하고 재생성하는 함수
-def reset_and_run_indexer():
+# Azure Search リソースを強制で削除するための関数を、ヘルパー関数を使用して簡素化
+def force_delete_search_resources():
     try:
-        logger.info("Starting to reset and recreate both index and indexer via direct API calls...")
-        import requests
-        
-        # Common headers for all requests
-        headers = {
-            'Content-Type': 'application/json',
-            'api-key': AZURE_SEARCH_KEY
-        }
-        
-        # 1. Delete the indexer first
-        indexer_url = f"{AZURE_SEARCH_ENDPOINT}/indexers/{INDEXER_NAME}?api-version=2020-06-30"
-        try:
-            delete_response = requests.delete(indexer_url, headers=headers)
-            if delete_response.status_code in [204, 404]:
-                logger.info(f"Indexer '{INDEXER_NAME}' deleted or did not exist")
-            else:
-                logger.warning(f"Error deleting indexer: {delete_response.status_code} - {delete_response.text}")
-        except Exception as e:
-            logger.warning(f"Exception when deleting indexer: {str(e)}")
-        
-        # 2. Delete the index - IMPORTANT for resetting all data
-        index_url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{INDEX_NAME}?api-version=2020-06-30"
-        try:
-            delete_response = requests.delete(index_url, headers=headers)
-            if delete_response.status_code in [204, 404]:
-                logger.info(f"Index '{INDEX_NAME}' deleted or did not exist")
-            else:
-                logger.warning(f"Error deleting index: {delete_response.status_code} - {delete_response.text}")
-        except Exception as e:
-            logger.warning(f"Exception when deleting index: {str(e)}")
-        
-        # 3. Make sure data source is also reset
-        datasource_url = f"{AZURE_SEARCH_ENDPOINT}/datasources/{DATASOURCE_NAME}?api-version=2020-06-30"
-        try:
-            delete_response = requests.delete(datasource_url, headers=headers)
-            if delete_response.status_code in [204, 404]:
-                logger.info(f"Data source '{DATASOURCE_NAME}' deleted or did not exist")
-            else:
-                logger.warning(f"Error deleting data source: {delete_response.status_code} - {delete_response.text}")
-        except Exception as e:
-            logger.warning(f"Exception when deleting data source: {str(e)}")
+        # 共通削除処理を実行
+        success, errors = delete_search_resources(log_prefix="[FORCE DELETE] ")
         
         # Wait to ensure Azure has completed the deletion operations
-        logger.info("Waiting for deletion operations to complete...")
+        time.sleep(5)
+        
+        # 削除確認
+        all_deleted = confirm_resources_deleted()
+        
+        # Return result
+        return all_deleted
+    except Exception as e:
+        logger.error(f"Error in force_delete_search_resources: {str(e)}")
+        return False
+
+# 既存の reset_and_run_indexer 関数も同様に更新
+def reset_and_run_indexer():
+    try:
+        logger.info("Starting to reset and recreate both index and indexer...")
+        
+        # 共通削除処理を実行
+        success, errors = delete_search_resources(log_prefix="[RESET] ")
+        
+        # Wait to ensure Azure has completed the deletion operations
         time.sleep(5)
         
         # 4. Recreate everything from scratch
@@ -397,6 +476,21 @@ def reset_and_run_indexer():
         logger.error(f"Unexpected error in reset_and_run_indexer: {str(e)}")
         return f"error: {str(e)}"
 
+# delete_and_recreate_search_resources 関数も同様に更新
+def delete_and_recreate_search_resources():
+    try:
+        # 共通削除処理を実行
+        success, errors = delete_search_resources(log_prefix="[RECREATE] ")
+        
+        # Add a small delay to ensure deletion is complete
+        time.sleep(5)
+        
+        # Create new resources
+        return create_search_resources()
+    except Exception as e:
+        logger.error(f"Error recreating search resources: {str(e)}")
+        return False
+
 # 인덱싱 상태를 확인하는 함수
 def get_indexer_status():
     try:
@@ -410,16 +504,18 @@ def get_indexer_status():
             logger.error(f"INDEXER_NAME is not a string: {type(INDEXER_NAME)}")
             return "error: INDEXER_NAME must be a string"
             
+        # 最新バージョンのAPIを指定してクライアントを作成
         indexer_client = SearchIndexerClient(
             endpoint=AZURE_SEARCH_ENDPOINT,
-            credential=AzureKeyCredential(AZURE_SEARCH_KEY)
+            credential=AzureKeyCredential(AZURE_SEARCH_KEY),
+            api_version=AZURE_SEARCH_API_VERSION
         )
         
         try:
             status = indexer_client.get_indexer_status(INDEXER_NAME)
             return status.last_result.status
         except ResourceNotFoundError:
-            # 인덱서가 없으면 생성 필요
+            # インデクサーがない場合は生成が必要
             return "not_found"
     except HttpResponseError as e:
         logger.error(f"Azure Search error: {str(e)}")
@@ -449,108 +545,6 @@ def check_index_exists():
         return response.status_code == 200
     except Exception as e:
         logger.error(f"Error checking if index exists: {str(e)}")
-        return False
-
-# Azure Search 리소스를 강제로 삭제하는 함수 (더 확실한 방법으로)
-def force_delete_search_resources():
-    try:
-        import requests
-        
-        # Common headers for all requests
-        headers = {
-            'Content-Type': 'application/json',
-            'api-key': AZURE_SEARCH_KEY
-        }
-        
-        # Log the start of process
-        logger.info("Starting forced deletion of all search resources")
-        
-        # 1. First check and delete the indexer
-        indexer_url = f"{AZURE_SEARCH_ENDPOINT}/indexers/{INDEXER_NAME}?api-version=2020-06-30"
-        try:
-            # Check if indexer exists
-            check_response = requests.get(indexer_url, headers=headers)
-            if check_response.status_code == 200:
-                # Indexer exists, delete it
-                delete_response = requests.delete(indexer_url, headers=headers)
-                if delete_response.status_code in [204, 404]:
-                    logger.info(f"Indexer '{INDEXER_NAME}' successfully deleted")
-                else:
-                    logger.warning(f"Failed to delete indexer: {delete_response.status_code} - {delete_response.text}")
-            else:
-                logger.info(f"Indexer '{INDEXER_NAME}' does not exist, no need to delete")
-        except Exception as e:
-            logger.warning(f"Error during indexer deletion check: {str(e)}")
-        
-        # 2. Wait to ensure indexer is deleted before deleting index
-        time.sleep(3)
-        
-        # 3. Now check and delete the index
-        index_url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{INDEX_NAME}?api-version=2020-06-30"
-        try:
-            # Check if index exists
-            check_response = requests.get(index_url, headers=headers)
-            if check_response.status_code == 200:
-                # Index exists, delete it
-                delete_response = requests.delete(index_url, headers=headers)
-                if delete_response.status_code in [204, 404]:
-                    logger.info(f"Index '{INDEX_NAME}' successfully deleted")
-                else:
-                    logger.warning(f"Failed to delete index: {delete_response.status_code} - {delete_response.text}")
-            else:
-                logger.info(f"Index '{INDEX_NAME}' does not exist, no need to delete")
-        except Exception as e:
-            logger.warning(f"Error during index deletion check: {str(e)}")
-        
-        # 4. Wait to ensure index is deleted
-        time.sleep(3)
-        
-        # 5. Finally check and delete the data source
-        datasource_url = f"{AZURE_SEARCH_ENDPOINT}/datasources/{DATASOURCE_NAME}?api-version=2020-06-30"
-        try:
-            # Check if data source exists
-            check_response = requests.get(datasource_url, headers=headers)
-            if check_response.status_code == 200:
-                # Data source exists, delete it
-                delete_response = requests.delete(datasource_url, headers=headers)
-                if delete_response.status_code in [204, 404]:
-                    logger.info(f"Data source '{DATASOURCE_NAME}' successfully deleted")
-                else:
-                    logger.warning(f"Failed to delete data source: {delete_response.status_code} - {delete_response.text}")
-            else:
-                logger.info(f"Data source '{DATASOURCE_NAME}' does not exist, no need to delete")
-        except Exception as e:
-            logger.warning(f"Error during data source deletion check: {str(e)}")
-        
-        # 6. Final check to ensure all resources are really gone
-        all_deleted = True
-        
-        # Check indexer
-        check_response = requests.get(indexer_url, headers=headers)
-        if check_response.status_code == 200:
-            logger.warning(f"Indexer '{INDEXER_NAME}' still exists after deletion attempt")
-            all_deleted = False
-        
-        # Check index
-        check_response = requests.get(index_url, headers=headers)
-        if check_response.status_code == 200:
-            logger.warning(f"Index '{INDEX_NAME}' still exists after deletion attempt")
-            all_deleted = False
-        
-        # Check data source
-        check_response = requests.get(datasource_url, headers=headers)
-        if check_response.status_code == 200:
-            logger.warning(f"Data source '{DATASOURCE_NAME}' still exists after deletion attempt")
-            all_deleted = False
-        
-        # Wait a bit more to ensure Azure processes the deletion
-        time.sleep(5)
-        
-        # Return result
-        return all_deleted
-        
-    except Exception as e:
-        logger.error(f"Error in force_delete_search_resources: {str(e)}")
         return False
 
 @app.post("/reset-search", response_model=StandardResponse, summary="Reset Search Index and Indexer", tags=["Search Management"])
@@ -585,7 +579,7 @@ async def reset_search_endpoint():
             logger.warning("Could not confirm complete deletion of search resources")
         
         # Add additional delay to ensure Azure backend has processed the deletions
-        time.sleep(5)
+        await asyncio.sleep(5)  # 同期的な time.sleep を asyncio.sleep に置き換え
         
         # Now create resources from scratch
         creation_result = create_search_resources()
@@ -600,7 +594,7 @@ async def reset_search_endpoint():
         
         return StandardResponse(
             success=True,
-            message="인덱스 및 인덱서가 성공적으로 재설정되었습니다.",
+            message="インデックス及びインデクサーが成功的に再設定されました。",
             data={"status": "success"},
             timestamp=datetime.now().isoformat()
         )
@@ -650,7 +644,7 @@ async def upload_pdf(file: UploadFile = File(...)):
             force_delete_search_resources()
             
             # Add a delay to ensure deletion is processed
-            time.sleep(5)
+            await asyncio.sleep(5)  # 同期的な time.sleep を asyncio.sleep に置き換え
             
             # Verify the index was deleted
             if check_index_exists():
@@ -661,9 +655,9 @@ async def upload_pdf(file: UploadFile = File(...)):
                     'Content-Type': 'application/json',
                     'api-key': AZURE_SEARCH_KEY
                 }
-                index_url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{INDEX_NAME}?api-version=2020-06-30"
+                index_url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{INDEX_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
                 requests.delete(index_url, headers=headers)
-                time.sleep(3)
+                await asyncio.sleep(3)  # 同期的な time.sleep を asyncio.sleep に置き換え
             
             # Now create new resources
             logger.info("Creating new search resources after deletion")
@@ -738,9 +732,9 @@ async def indexer_status():
                     timestamp=datetime.now().isoformat()
                 )
 
-        message = "인덱싱 상태 확인 완료"
+        message = "インデックス状態確認完了"
         if status == "not_found":
-            message = "인덱서가 존재하지 않습니다. PDF를 업로드하여 인덱서를 생성하세요."
+            message = "インデクサーが存在しません。PDFをアップロードしてインデクサーを作成してください。"
 
         return StandardResponse(
             success=True,
@@ -798,16 +792,30 @@ async def check_any_files():
 def search_pdf_content(query: str, top_k=3) -> dict:
     """Query Azure Search index for relevant PDF content and return structured results."""
     try:
+        # 最新バージョンのAPIを指定してクライアントを作成
         search_client = SearchClient(
             endpoint=AZURE_SEARCH_ENDPOINT,
             index_name=INDEX_NAME,
-            credential=AzureKeyCredential(AZURE_SEARCH_KEY)
+            credential=AzureKeyCredential(AZURE_SEARCH_KEY),
+            api_version=AZURE_SEARCH_API_VERSION
         )
+        
+        # 検索オプションを設定
+        search_options = {
+            "select": ["content", "metadata_storage_name", "metadata_storage_path"],
+            "top": top_k,
+            "query_type": "simple",  # または必要に応じて "full" や "semantic"
+            "query_language": "ja-JP"  # 日本語コンテンツに対応
+        }
+        
+        # セマンティック検索を使用する場合（オプション）
+        # search_options["query_type"] = "semantic"
+        # search_options["semantic_configuration_name"] = "default"
+        # search_options["query_caption"] = "extractive|highlight-true"
         
         results = search_client.search(
             search_text=query,
-            select=["content", "metadata_storage_name", "metadata_storage_path"],
-            top=top_k
+            **search_options
         )
         
         documents = []
@@ -831,23 +839,30 @@ def search_pdf_content(query: str, top_k=3) -> dict:
         }
             
     except Exception as e:
-        print(f"Search error: {str(e)}")
+        logger.error(f"Search error: {str(e)}")
         return {"error": str(e), "documents": [], "count": 0, "query": query}
 
 async def get_pdf_content(query="*") -> dict:
     """Retrieve all uploaded PDF content from the Azure Search index."""
     try:
+        # 最新バージョンのAPIを指定してクライアントを作成
         search_client = SearchClient(
             endpoint=AZURE_SEARCH_ENDPOINT,
             index_name=INDEX_NAME,
-            credential=AzureKeyCredential(AZURE_SEARCH_KEY)
+            credential=AzureKeyCredential(AZURE_SEARCH_KEY),
+            api_version=AZURE_SEARCH_API_VERSION
         )
+        
+        # 検索オプションを設定
+        search_options = {
+            "select": ["content", "metadata_storage_name", "metadata_storage_path"],
+            "top": 100  # Adjust based on expected document count
+        }
         
         # Use "*" as a wildcard query to get all documents
         results = search_client.search(
             search_text=query,
-            select=["content", "metadata_storage_name", "metadata_storage_path"],
-            top=100  # Adjust based on expected document count
+            **search_options
         )
         
         documents = []
@@ -868,7 +883,7 @@ async def get_pdf_content(query="*") -> dict:
         }
             
     except Exception as e:
-        print(f"Error retrieving PDF content: {str(e)}")
+        logger.error(f"Error retrieving PDF content: {str(e)}")
         return {"error": str(e), "documents": [], "count": 0}
 
 @app.get("/pdf-content")
