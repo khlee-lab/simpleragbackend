@@ -326,66 +326,164 @@ def delete_search_resources(log_prefix=""):
         tuple: (bool, list) - 成功したかどうかのフラグとエラーメッセージのリスト
     """
     try:
-        import requests
         errors = []
         
-        # Common headers for all requests
-        headers = {
-            'Content-Type': 'application/json',
-            'api-key': AZURE_SEARCH_KEY
-        }
-        
-        logger.info(f"{log_prefix}Starting deletion of search resources")
-        
-        # 1. Delete indexer - API バージョンを最新に更新
-        indexer_url = f"{AZURE_SEARCH_ENDPOINT}/indexers/{INDEXER_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
+        # 専用クライアントを使用した削除処理
         try:
-            delete_response = requests.delete(indexer_url, headers=headers)
-            if delete_response.status_code in [204, 404]:
-                logger.info(f"{log_prefix}Indexer '{INDEXER_NAME}' deleted or did not exist")
-            else:
-                error_msg = f"Failed to delete indexer: {delete_response.status_code} - {delete_response.text}"
+            # インデクサークライアントを使用してインデクサーとデータソースを削除
+            indexer_client = SearchIndexerClient(
+                endpoint=AZURE_SEARCH_ENDPOINT,
+                credential=AzureKeyCredential(AZURE_SEARCH_KEY)
+            )
+            
+            # インデックスクライアントを使用してインデックスを削除
+            index_client = SearchIndexClient(
+                endpoint=AZURE_SEARCH_ENDPOINT,
+                credential=AzureKeyCredential(AZURE_SEARCH_KEY)
+            )
+            
+            logger.info(f"{log_prefix}Using SearchIndexerClient and SearchIndexClient to delete resources")
+            
+            # 1. インデクサーの削除
+            try:
+                indexer_client.delete_indexer(INDEXER_NAME)
+                logger.info(f"{log_prefix}Indexer '{INDEXER_NAME}' deleted successfully with client")
+            except ResourceNotFoundError:
+                logger.info(f"{log_prefix}Indexer '{INDEXER_NAME}' not found")
+            except Exception as e:
+                error_msg = f"Exception when deleting indexer with client: {str(e)}"
                 logger.warning(f"{log_prefix}{error_msg}")
                 errors.append(error_msg)
-        except Exception as e:
-            error_msg = f"Exception when deleting indexer: {str(e)}"
-            logger.warning(f"{log_prefix}{error_msg}")
-            errors.append(error_msg)
-        
-        # 2. Delete index - API バージョンを最新に更新
-        index_url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{INDEX_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
-        try:
-            delete_response = requests.delete(index_url, headers=headers)
-            if delete_response.status_code in [204, 404]:
-                logger.info(f"{log_prefix}Index '{INDEX_NAME}' deleted or did not exist")
-            else:
-                error_msg = f"Failed to delete index: {delete_response.status_code} - {delete_response.text}"
+            
+            # 2. インデックスの削除
+            try:
+                index_client.delete_index(INDEX_NAME)
+                logger.info(f"{log_prefix}Index '{INDEX_NAME}' deleted successfully with client")
+            except ResourceNotFoundError:
+                logger.info(f"{log_prefix}Index '{INDEX_NAME}' not found")
+            except Exception as e:
+                error_msg = f"Exception when deleting index with client: {str(e)}"
                 logger.warning(f"{log_prefix}{error_msg}")
                 errors.append(error_msg)
-        except Exception as e:
-            error_msg = f"Exception when deleting index: {str(e)}"
-            logger.warning(f"{log_prefix}{error_msg}")
-            errors.append(error_msg)
-        
-        # 3. Delete data source - API バージョンを最新に更新 
-        datasource_url = f"{AZURE_SEARCH_ENDPOINT}/datasources/{DATASOURCE_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
-        try:
-            delete_response = requests.delete(datasource_url, headers=headers)
-            if delete_response.status_code in [204, 404]:
-                logger.info(f"{log_prefix}Data source '{DATASOURCE_NAME}' deleted or did not exist")
-            else:
-                error_msg = f"Failed to delete data source: {delete_response.status_code} - {delete_response.text}"
+            
+            # 3. データソースの削除
+            try:
+                indexer_client.delete_data_source_connection(DATASOURCE_NAME)
+                logger.info(f"{log_prefix}Data source '{DATASOURCE_NAME}' deleted successfully with client")
+            except ResourceNotFoundError:
+                logger.info(f"{log_prefix}Data source '{DATASOURCE_NAME}' not found")
+            except Exception as e:
+                error_msg = f"Exception when deleting data source with client: {str(e)}"
                 logger.warning(f"{log_prefix}{error_msg}")
                 errors.append(error_msg)
+                
         except Exception as e:
-            error_msg = f"Exception when deleting data source: {str(e)}"
-            logger.warning(f"{log_prefix}{error_msg}")
-            errors.append(error_msg)
+            logger.warning(f"{log_prefix}Error using SDK clients for deletion: {str(e)}. Falling back to REST API...")
+            
+            # REST API をフォールバックとして使用
+            import requests
+            headers = {
+                'Content-Type': 'application/json',
+                'api-key': AZURE_SEARCH_KEY
+            }
+            
+            # 1. Delete indexer via REST
+            indexer_url = f"{AZURE_SEARCH_ENDPOINT}/indexers/{INDEXER_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
+            try:
+                delete_response = requests.delete(indexer_url, headers=headers)
+                if delete_response.status_code in [204, 404]:
+                    logger.info(f"{log_prefix}Indexer '{INDEXER_NAME}' deleted or did not exist via REST")
+                else:
+                    error_msg = f"Failed to delete indexer via REST: {delete_response.status_code} - {delete_response.text}"
+                    logger.warning(f"{log_prefix}{error_msg}")
+                    errors.append(error_msg)
+            except Exception as e:
+                error_msg = f"Exception when deleting indexer via REST: {str(e)}"
+                logger.warning(f"{log_prefix}{error_msg}")
+                errors.append(error_msg)
+            
+            # 2. Delete index via REST
+            index_url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{INDEX_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
+            try:
+                delete_response = requests.delete(index_url, headers=headers)
+                if delete_response.status_code in [204, 404]:
+                    logger.info(f"{log_prefix}Index '{INDEX_NAME}' deleted or did not exist via REST")
+                else:
+                    error_msg = f"Failed to delete index via REST: {delete_response.status_code} - {delete_response.text}"
+                    logger.warning(f"{log_prefix}{error_msg}")
+                    errors.append(error_msg)
+            except Exception as e:
+                error_msg = f"Exception when deleting index via REST: {str(e)}"
+                logger.warning(f"{log_prefix}{error_msg}")
+                errors.append(error_msg)
+            
+            # 3. Delete data source via REST
+            datasource_url = f"{AZURE_SEARCH_ENDPOINT}/datasources/{DATASOURCE_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
+            try:
+                delete_response = requests.delete(datasource_url, headers=headers)
+                if delete_response.status_code in [204, 404]:
+                    logger.info(f"{log_prefix}Data source '{DATASOURCE_NAME}' deleted or did not exist via REST")
+                else:
+                    error_msg = f"Failed to delete data source via REST: {delete_response.status_code} - {delete_response.text}"
+                    logger.warning(f"{log_prefix}{error_msg}")
+                    errors.append(error_msg)
+            except Exception as e:
+                error_msg = f"Exception when deleting data source via REST: {str(e)}"
+                logger.warning(f"{log_prefix}{error_msg}")
+                errors.append(error_msg)
         
         return (len(errors) == 0, errors)
     except Exception as e:
         logger.error(f"{log_prefix}Unexpected error in delete_search_resources: {str(e)}")
         return (False, [f"Unexpected error: {str(e)}"])
+
+# インデクサの実行状態をリセットする関数を追加
+def reset_indexer():
+    """インデクサの実行状態をリセットする"""
+    try:
+        import requests
+        headers = {
+            'Content-Type': 'application/json',
+            'api-key': AZURE_SEARCH_KEY
+        }
+        
+        reset_url = f"{AZURE_SEARCH_ENDPOINT}/indexers/{INDEXER_NAME}/reset?api-version={AZURE_SEARCH_API_VERSION}"
+        logger.info(f"Resetting indexer: {reset_url}")
+        response = requests.post(reset_url, headers=headers)
+        
+        if response.status_code in [204, 200]:
+            logger.info(f"Indexer '{INDEXER_NAME}' reset successfully")
+            return True
+        else:
+            logger.warning(f"Failed to reset indexer: {response.status_code} - {response.text}")
+            return False
+    except Exception as e:
+        logger.error(f"Error resetting indexer: {str(e)}")
+        return False
+
+# インデクサを明示的に実行する関数を追加
+def run_indexer():
+    """インデクサを明示的に実行する"""
+    try:
+        import requests
+        headers = {
+            'Content-Type': 'application/json',
+            'api-key': AZURE_SEARCH_KEY
+        }
+        
+        run_url = f"{AZURE_SEARCH_ENDPOINT}/indexers/{INDEXER_NAME}/run?api-version={AZURE_SEARCH_API_VERSION}"
+        logger.info(f"Running indexer: {run_url}")
+        response = requests.post(run_url, headers=headers)
+        
+        if response.status_code in [202, 204]:
+            logger.info(f"Indexer '{INDEXER_NAME}' run triggered successfully")
+            return True
+        else:
+            logger.warning(f"Failed to run indexer: {response.status_code} - {response.text}")
+            return False
+    except Exception as e:
+        logger.error(f"Error running indexer: {str(e)}")
+        return False
 
 # ヘルパー関数: リソースが確実に削除されたか確認する
 def confirm_resources_deleted():
@@ -606,6 +704,7 @@ async def reset_search_endpoint():
             timestamp=datetime.now().isoformat()
         )
 
+# アップロードエンドポイントを改善
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     try:
@@ -617,50 +716,48 @@ async def upload_pdf(file: UploadFile = File(...)):
                 timestamp=datetime.now().isoformat()
             )
 
-        # 기존 PDF 삭제
+        # 既存のBlobを削除
         blob_service = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
         container_client = blob_service.get_container_client(CONTAINER_NAME)
 
-        # 컨테이너 존재 확인 및 생성
+        # コンテナ存在確認および作成
         try:
             container_client.get_container_properties()
         except:
             blob_service.create_container(CONTAINER_NAME)
             container_client = blob_service.get_container_client(CONTAINER_NAME)
 
-        # Delete existing blobs
+        # 既存のBlobを削除
         blobs = container_client.list_blobs()
         for blob in blobs:
             container_client.delete_blob(blob.name)
+            logger.info(f"Deleted blob: {blob.name}")
 
-        # 새 PDF 업로드
+        # 新しいPDFをアップロード
         blob_client = blob_service.get_blob_client(container=CONTAINER_NAME, blob=file.filename)
         content = await file.read()
         blob_client.upload_blob(content, overwrite=True)
+        logger.info(f"Uploaded new file: {file.filename}")
 
-        # Use the improved force delete function to ensure all resources are deleted
+        # 検索リソースの処理
+        indexer_status = "unknown"
         try:
+            # Step 1: 既存のインデクサがあればリセット
+            reset_indexer()
+            await asyncio.sleep(2)
+            
+            # Step 2: REST APIを使用して確実に検索リソースを削除
             logger.info("Forcefully deleting all search resources before recreation")
-            force_delete_search_resources()
+            success, errors = delete_search_resources(log_prefix="[UPLOAD] ")
+            if not success:
+                logger.warning(f"Errors during resource deletion: {errors}")
             
-            # Add a delay to ensure deletion is processed
-            await asyncio.sleep(5)  # 同期的な time.sleep を asyncio.sleep に置き換え
+            # Step 3: 十分な待機時間を設定
+            logger.info("Waiting for Azure Search to process deletion...")
+            await asyncio.sleep(10)
             
-            # Verify the index was deleted
-            if check_index_exists():
-                logger.warning("Index still exists after deletion attempt - trying delete again")
-                # Try direct delete one more time
-                import requests
-                headers = {
-                    'Content-Type': 'application/json',
-                    'api-key': AZURE_SEARCH_KEY
-                }
-                index_url = f"{AZURE_SEARCH_ENDPOINT}/indexes/{INDEX_NAME}?api-version={AZURE_SEARCH_API_VERSION}"
-                requests.delete(index_url, headers=headers)
-                await asyncio.sleep(3)  # 同期的な time.sleep を asyncio.sleep に置き換え
-            
-            # Now create new resources
-            logger.info("Creating new search resources after deletion")
+            # Step 4: 検索リソースを再作成
+            logger.info("Creating new search resources")
             recreate_result = create_search_resources()
             
             if not recreate_result:
@@ -670,16 +767,19 @@ async def upload_pdf(file: UploadFile = File(...)):
                     timestamp=datetime.now().isoformat()
                 )
             
-            # Set indexer status
-            indexer_status = "created_and_running"
-                
+            # Step 5: インデクサを明示的に実行
+            logger.info("Explicitly triggering indexer run")
+            run_result = run_indexer()
+            
+            indexer_status = "created_and_running" if run_result else "created_but_not_running"
+            
         except Exception as e:
             logger.error(f"Error during search resource recreation: {str(e)}")
             indexer_status = f"error: {str(e)}"
-            
+        
         return StandardResponse(
             success=True,
-            message="파일 업로드 완료 및 검색 리소스 재생성",
+            message="ファイル アップロード完了、検索リソースを再作成しました",
             data={"filename": file.filename, "indexer_status": indexer_status},
             timestamp=datetime.now().isoformat()
         )
