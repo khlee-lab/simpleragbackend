@@ -530,35 +530,32 @@ openai_manager = AzureOpenAIManager(
 @app.post("/upload", response_model=StandardResponse)
 async def upload_pdf(file: UploadFile = File(...)):
     """
-    新しいPDFファイルをアップロードするときに、既存のBlobとインデックスをすべて削除し、
-    1ファイルのみを新しくインデックスし直すエンドポイント。
+    新しいPDFをアップロードするたびに検索リソース(インデックスなど)とBlobをリセットし、
+    アップロードしたPDF一つだけがインデックスされるようにするエンドポイント。
     
-    フロー:
-      1) 既存Blobを全削除
-      2) 新しいPDFをアップロード
-      3) 既存のSearchリソース(データソース/インデックス/インデクサ)を削除
-      4) 数秒待機 (Azure削除反映待ち)
-      5) Searchリソースを再作成 (data source, index, indexer)
-      6) インデクサを手動実行 (念のため)
+    1) 既存のAzure Searchリソースを削除
+    2) 既存Blobを削除
+    3) 新PDFをアップロード
+    4) Searchリソースを再作成
+    5) インデクサを手動実行
     """
     try:
-        # 1. 既存Blobを全削除
-        blob_manager.delete_all_blobs()
-
-        # 2. 新PDFアップロード
-        content = await file.read()
-        blob_manager.upload_blob(file.filename, content)
-
-        # 3. 既存のSearchリソースを削除
+        # 1. 既存の Azure Search リソースを削除
         logger.info("Deleting existing search resources...")
         success, errors = search_manager.delete_search_resources()
         if not success:
-            logger.warning(f"Some errors occurred while deleting: {errors}")
+            logger.warning(f"Some errors occurred while deleting search resources: {errors}")
 
-        # 4. 少し待機 (削除の反映を待つ)
-        await asyncio.sleep(5)
+        # 2. Blob をすべて削除
+        logger.info("Deleting all existing blobs...")
+        blob_manager.delete_all_blobs()
 
-        # 5. Searchリソースを再作成
+        # 3. 新しい PDF をアップロード
+        logger.info("Uploading new PDF...")
+        content = await file.read()
+        blob_manager.upload_blob(file.filename, content)
+
+        # 4. Azure Search リソースを再作成
         logger.info("Creating new search resources...")
         created = search_manager.create_search_resources()
         if not created:
@@ -568,14 +565,14 @@ async def upload_pdf(file: UploadFile = File(...)):
                 timestamp=datetime.now().isoformat()
             )
 
-        # 6. インデクサを手動実行 (追加で実行しておきたい場合)
+        # 5. インデクサを手動実行
         logger.info("Manually triggering indexer run...")
         run_res = search_manager.run_indexer()
         indexer_status = "running" if run_res else "not_running"
 
         return StandardResponse(
             success=True,
-            message="ファイルアップロードとインデックス再作成が完了しました。",
+            message="ファイルアップロードとインデックス再作成が完了しました。既存のドキュメントは削除済みです。",
             data={"filename": file.filename, "indexer_status": indexer_status},
             timestamp=datetime.now().isoformat()
         )
@@ -587,7 +584,6 @@ async def upload_pdf(file: UploadFile = File(...)):
             message=f"Upload failed: {str(e)}",
             timestamp=datetime.now().isoformat()
         )
-
 
 @app.get("/indexer-status", response_model=StandardResponse)
 async def get_indexer_status():
@@ -622,7 +618,6 @@ async def get_indexer_status():
             message=f"Failed to get indexer status: {str(e)}",
             timestamp=datetime.now().isoformat()
         )
-
 
 @app.get("/pdf-content", response_model=StandardResponse)
 async def get_pdf_content_endpoint(query: str = "*"):
@@ -671,15 +666,10 @@ async def get_pdf_content_endpoint(query: str = "*"):
             timestamp=datetime.now().isoformat()
         )
 
-
 @app.post("/chat", response_model=StandardResponse)
 async def chat(prompt: str):
     """
     アップロード済みのPDF内容をもとにAzure OpenAIチャット回答を行う。
-    
-    - 全PDFのテキストを取得しSystemメッセージに詰め込む
-    - Userプロンプトと併せてOpenAIへ投げる
-    - 回答を返す
     """
     try:
         status = search_manager.get_indexer_status()
@@ -717,7 +707,7 @@ async def chat(prompt: str):
         else:
             pdf_context = "No PDF content found."
 
-        # システムメッセージにPDF内容を含める
+        # システムメッセージ
         system_message = (
             "You are an AI assistant that helps answer questions based on PDF documents.\n"
             "Answer based ONLY on the content in the documents provided below.\n"
@@ -744,15 +734,14 @@ async def chat(prompt: str):
             timestamp=datetime.now().isoformat()
         )
 
-
 @app.get("/health")
 async def health():
     """ヘルスチェック用"""
     return {"status": "healthy", "service": "simplerag"}
 
 # ローカル実行用
-# if __name__ == "__main__":
-#     port = int(os.environ.get("PORT", 8000))
-#     host = os.environ.get("HOST", "0.0.0.0")
-#     logger.info(f"Starting FastAPI server on {host}:{port}...")
-#     uvicorn.run(app, host=host, port=port)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    host = os.environ.get("HOST", "0.0.0.0")
+    logger.info(f"Starting FastAPI server on {host}:{port}...")
+    uvicorn.run(app, host=host, port=port)
