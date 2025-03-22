@@ -4,7 +4,7 @@ import asyncio
 import logging
 import requests
 from datetime import datetime
-from typing import Any, Optional, List
+from typing import Any, Optional, List, Tuple, Dict
 
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -58,9 +58,7 @@ AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION")
 AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_MODEL_NAME = os.environ.get("AZURE_OPENAI_MODEL_NAME")
 
-# =========================================================
-# 必須環境変数チェック
-# =========================================================
+# 必須環境変数の検証
 required_env_vars = {
     "AZURE_STORAGE_CONNECTION_STRING": AZURE_STORAGE_CONNECTION_STRING,
     "CONTAINER_NAME": CONTAINER_NAME,
@@ -86,9 +84,10 @@ openai.api_version = AZURE_OPENAI_API_VERSION
 openai.api_key = AZURE_OPENAI_API_KEY
 
 # =========================================================
-# 標準レスポンス用のPydanticモデル
+# Pydanticモデル
 # =========================================================
 class StandardResponse(BaseModel):
+    """APIの標準レスポンス用モデル。"""
     success: bool
     message: str
     data: Optional[Any] = None
@@ -107,28 +106,32 @@ class AzureBlobManager:
         self.container_client = self.blob_service_client.get_container_client(container_name)
         self.ensure_container_exists()
 
-    def ensure_container_exists(self):
+    def ensure_container_exists(self) -> None:
         """コンテナが存在しない場合は作成。"""
         try:
             self.container_client.get_container_properties()
-        except:
+        except Exception:
             logger.info(f"Container '{self.container_name}' does not exist. Creating...")
             self.blob_service_client.create_container(self.container_name)
             self.container_client = self.blob_service_client.get_container_client(self.container_name)
 
-    def delete_all_blobs(self):
-        """コンテナ内のBlobをすべて削除する"""
+    def delete_all_blobs(self) -> None:
+        """コンテナ内のBlobをすべて削除する。"""
         try:
-            blobs = self.container_client.list_blobs()
-            for blob in blobs:
+            for blob in self.container_client.list_blobs():
                 self.container_client.delete_blob(blob.name)
                 logger.info(f"Deleted blob: {blob.name}")
         except Exception as e:
             logger.error(f"Error deleting blobs: {str(e)}")
             raise
 
-    def upload_blob(self, file_name: str, content: bytes):
-        """Blobをアップロードする"""
+    def upload_blob(self, file_name: str, content: bytes) -> None:
+        """Blobをアップロードする。
+
+        Args:
+            file_name (str): アップロード先のBlob名
+            content (bytes): ファイルのバイナリ内容
+        """
         try:
             blob_client = self.blob_service_client.get_blob_client(
                 container=self.container_name,
@@ -145,6 +148,8 @@ class AzureBlobManager:
 # =========================================================
 class AzureSearchManager:
     """Azure Cognitive Search の操作をまとめたクラス。"""
+
+    SUCCESSFUL_RUN_STATUS_CODES = {200, 202, 204}
 
     def __init__(
         self,
@@ -176,12 +181,14 @@ class AzureSearchManager:
             credential=AzureKeyCredential(self.api_key)
         )
 
-    def delete_search_resources(self) -> tuple[bool, List[str]]:
+    def delete_search_resources(self) -> Tuple[bool, List[str]]:
         """
         データソース・インデクサ・インデックスを削除。
-        戻り値：(成功フラグ, エラー内容リスト)
+
+        Returns:
+            tuple[bool, List[str]]: (成功フラグ, エラー内容リスト)
         """
-        errors = []
+        errors: List[str] = []
         try:
             # --- インデクサ削除 ---
             try:
@@ -225,8 +232,11 @@ class AzureSearchManager:
 
     def create_search_resources(self) -> bool:
         """
-        データソース・インデックス・インデクサーを作成（存在すれば更新）。
+        データソース・インデックス・インデクサーを作成（存在すれば更新）し、
         インデクサーを実行して終了。
+
+        Returns:
+            bool: 作成と実行に成功したかどうか
         """
         try:
             headers = {
@@ -332,6 +342,7 @@ class AzureSearchManager:
             inx_resp = requests.put(indexer_url, headers=headers, json=indexer_body)
             inx_resp.raise_for_status()
             logger.info(f"Indexer '{self.indexer_name}' created/updated.")
+
             time.sleep(2)  # API 反映待ち
 
             # 4. インデクサーを今すぐ実行
@@ -354,12 +365,11 @@ class AzureSearchManager:
             }
             url = f"{self.endpoint}/indexers/{self.indexer_name}/run?api-version={self.api_version}"
             resp = requests.post(url, headers=headers)
-            if resp.status_code in [200, 202, 204]:
+            if resp.status_code in self.SUCCESSFUL_RUN_STATUS_CODES:
                 logger.info(f"Indexer '{self.indexer_name}' run triggered.")
                 return True
-            else:
-                logger.warning(f"Failed to trigger indexer run: {resp.status_code}, {resp.text}")
-                return False
+            logger.warning(f"Failed to trigger indexer run: {resp.status_code}, {resp.text}")
+            return False
         except Exception as e:
             logger.error(f"Error running indexer: {str(e)}")
             return False
@@ -387,7 +397,7 @@ class AzureSearchManager:
             logger.error(f"Unexpected error: {str(e)}")
             return f"error: {str(e)}"
 
-    def search_pdf_content(self, query: str, top_k=3) -> dict:
+    def search_pdf_content(self, query: str, top_k: int = 3) -> Dict[str, Any]:
         """クエリでPDFのコンテンツを検索。"""
         try:
             search_client = SearchClient(
@@ -421,7 +431,7 @@ class AzureSearchManager:
             logger.error(f"Search error: {str(e)}")
             return {"error": str(e), "documents": [], "count": 0, "query": query}
 
-    async def get_all_pdf_content(self) -> dict:
+    async def get_all_pdf_content(self) -> Dict[str, Any]:
         """インデックス内のすべてのPDFコンテンツを取得 (query='*')。"""
         try:
             search_client = SearchClient(
@@ -451,6 +461,38 @@ class AzureSearchManager:
             logger.error(f"Error retrieving all PDF content: {str(e)}")
             return {"error": str(e), "documents": [], "count": 0}
 
+    def clear_all_documents(self) -> bool:
+        """
+        インデックス内のすべてのドキュメントを削除するが、インデックスの構造は保持する。
+        ワイルドカード（'*'）で一括削除を行う。
+        """
+        try:
+            url = f"{self.endpoint}/indexes/{self.index_name}/docs/index?api-version={self.api_version}"
+            headers = {
+                "Content-Type": "application/json",
+                "api-key": self.api_key
+            }
+            payload = {
+                "value": [
+                    {
+                        "@search.action": "delete",
+                        "id": "*"
+                    }
+                ]
+            }
+            logger.info("Clearing all documents from the index using wildcard delete.")
+            response = requests.post(url, headers=headers, json=payload)
+
+            if response.status_code in (200, 207):
+                logger.info("Index documents cleared successfully.")
+                return True
+            else:
+                logger.error(f"Failed to clear index documents: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"Error clearing index documents: {str(e)}")
+            return False
+
 # =========================================================
 # Azure OpenAI管理クラス
 # =========================================================
@@ -463,8 +505,25 @@ class AzureOpenAIManager:
         self.api_version = api_version
         self.model_name = model_name
 
-    def chat_completion(self, system_message: str, user_prompt: str, temperature=0.7, top_p=0.95) -> str:
-        """Azure OpenAI ChatCompletion"""
+    def chat_completion(
+        self,
+        system_message: str,
+        user_prompt: str,
+        temperature: float = 0.7,
+        top_p: float = 0.95
+    ) -> str:
+        """
+        Azure OpenAI ChatCompletion を実行する。
+
+        Args:
+            system_message (str): システムメッセージ
+            user_prompt (str): ユーザーからのプロンプト
+            temperature (float): 生成の多様性
+            top_p (float): nucleus sampling
+
+        Returns:
+            str: モデルの返答文字列
+        """
         try:
             client = AzureOpenAI(
                 api_key=self.api_key,
@@ -524,38 +583,34 @@ openai_manager = AzureOpenAIManager(
 )
 
 # =========================================================
-# エンドポイント
+# エンドポイント定義
 # =========================================================
-
 @app.post("/upload", response_model=StandardResponse)
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(file: UploadFile = File(...)) -> StandardResponse:
     """
     新しいPDFをアップロードするたびに検索リソース(インデックスなど)とBlobをリセットし、
     アップロードしたPDF一つだけがインデックスされるようにするエンドポイント。
-    
-    1) 既存のAzure Searchリソースを削除
-    2) 既存Blobを削除
-    3) 新PDFをアップロード
-    4) Searchリソースを再作成
-    5) インデクサを手動実行
+
+    1. 既存のAzure Searchリソース削除
+    2. 既存Blobを削除
+    3. 新PDFをアップロード
+    4. Searchリソースを再作成
+    5. インデックス内のドキュメントをクリア
+    6. インデクサを手動実行
     """
     try:
-        # 1. 既存の Azure Search リソースを削除
         logger.info("Deleting existing search resources...")
         success, errors = search_manager.delete_search_resources()
         if not success:
             logger.warning(f"Some errors occurred while deleting search resources: {errors}")
 
-        # 2. Blob をすべて削除
         logger.info("Deleting all existing blobs...")
         blob_manager.delete_all_blobs()
 
-        # 3. 新しい PDF をアップロード
         logger.info("Uploading new PDF...")
         content = await file.read()
         blob_manager.upload_blob(file.filename, content)
 
-        # 4. Azure Search リソースを再作成
         logger.info("Creating new search resources...")
         created = search_manager.create_search_resources()
         if not created:
@@ -565,7 +620,12 @@ async def upload_pdf(file: UploadFile = File(...)):
                 timestamp=datetime.now().isoformat()
             )
 
-        # 5. インデクサを手動実行
+        # clear_all_documents を呼び出す
+        logger.info("Clearing all existing documents from the new index...")
+        cleared = search_manager.clear_all_documents()
+        if not cleared:
+            logger.warning("Failed to clear documents in the index (it may already be empty).")
+
         logger.info("Manually triggering indexer run...")
         run_res = search_manager.run_indexer()
         indexer_status = "running" if run_res else "not_running"
@@ -585,9 +645,12 @@ async def upload_pdf(file: UploadFile = File(...)):
             timestamp=datetime.now().isoformat()
         )
 
+
 @app.get("/indexer-status", response_model=StandardResponse)
-async def get_indexer_status():
-    """インデクサーのステータスを返すエンドポイント"""
+async def get_indexer_status() -> StandardResponse:
+    """
+    インデクサーのステータスを返すエンドポイント。
+    """
     try:
         status = search_manager.get_indexer_status()
         if status == "not_found":
@@ -613,20 +676,21 @@ async def get_indexer_status():
         )
 
     except Exception as e:
+        logger.error(f"Failed to get indexer status: {str(e)}")
         return StandardResponse(
             success=False,
             message=f"Failed to get indexer status: {str(e)}",
             timestamp=datetime.now().isoformat()
         )
 
+
 @app.get("/pdf-content", response_model=StandardResponse)
-async def get_pdf_content_endpoint(query: str = "*"):
+async def get_pdf_content_endpoint(query: str = "*") -> StandardResponse:
     """
     指定したクエリ(query)をもとにAzure Searchへ全文検索を行い、
     ヒットしたPDFのコンテンツを返す。
     """
     try:
-        # インデクサ状態確認
         status = search_manager.get_indexer_status()
         if status == "not_found":
             return StandardResponse(
@@ -666,8 +730,9 @@ async def get_pdf_content_endpoint(query: str = "*"):
             timestamp=datetime.now().isoformat()
         )
 
+
 @app.post("/chat", response_model=StandardResponse)
-async def chat(prompt: str):
+async def chat(prompt: str) -> StandardResponse:
     """
     アップロード済みのPDF内容をもとにAzure OpenAIチャット回答を行う。
     """
@@ -734,14 +799,18 @@ async def chat(prompt: str):
             timestamp=datetime.now().isoformat()
         )
 
+
 @app.get("/health")
-async def health():
-    """ヘルスチェック用"""
+async def health() -> Dict[str, str]:
+    """
+    ヘルスチェック用。
+    """
     return {"status": "healthy", "service": "simplerag"}
 
-# ローカル実行用
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    host = os.environ.get("HOST", "0.0.0.0")
-    logger.info(f"Starting FastAPI server on {host}:{port}...")
-    uvicorn.run(app, host=host, port=port)
+
+# # ローカル実行用
+# if __name__ == "__main__":
+#     port = int(os.environ.get("PORT", 8000))
+#     host = os.environ.get("HOST", "0.0.0.0")
+#     logger.info(f"Starting FastAPI server on {host}:{port}...")
+#     uvicorn.run(app, host=host, port=port)
