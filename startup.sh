@@ -17,4 +17,4 @@ fi
 # The $PORT variable is set by Azure App Service. 
 echo "Starting FastAPI application..."
 #uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
-gunicorn main:app --bind=0.0.0.0 --port=$PORT
+gunicorn main:app --workers 2 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:${PORT:-8000}
