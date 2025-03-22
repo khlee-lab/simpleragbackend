@@ -16,4 +16,5 @@ fi
 # Assumes your application entrypoint file is 'main.py' with an 'app' instance.
 # The $PORT variable is set by Azure App Service. 
 echo "Starting FastAPI application..."
-uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
+#uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
+gunicorn main:app --bind=0.0.0.0 --port=$PORT
