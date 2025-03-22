@@ -493,6 +493,37 @@ class AzureSearchManager:
             logger.error(f"Error clearing index documents: {str(e)}")
             return False
 
+    def delete_index_and_indexer_only(self) -> List[str]:
+        """
+        インデクサとインデックスだけを削除する（データソースは残す）。
+        Returns:
+            List[str]: 削除時に発生したエラーメッセージのリスト（なければ空）
+        """
+        errors: List[str] = []
+        # -- インデクサ削除
+        try:
+            self.indexer_client.delete_indexer(self.indexer_name)
+            logger.info(f"Indexer '{self.indexer_name}' deleted.")
+        except ResourceNotFoundError:
+            logger.info(f"Indexer '{self.indexer_name}' not found.")
+        except Exception as e:
+            msg = f"Error deleting indexer: {str(e)}"
+            logger.warning(msg)
+            errors.append(msg)
+
+        # -- インデックス削除
+        try:
+            self.index_client.delete_index(self.index_name)
+            logger.info(f"Index '{self.index_name}' deleted.")
+        except ResourceNotFoundError:
+            logger.info(f"Index '{self.index_name}' not found.")
+        except Exception as e:
+            msg = f"Error deleting index: {str(e)}"
+            logger.warning(msg)
+            errors.append(msg)
+
+        return errors
+
 # =========================================================
 # Azure OpenAI管理クラス
 # =========================================================
@@ -620,7 +651,7 @@ async def upload_pdf(file: UploadFile = File(...)) -> StandardResponse:
                 timestamp=datetime.now().isoformat()
             )
 
-        # clear_all_documents を呼び出す
+        # clear_all_documents を呼び出す（※インデックス再作成後にドキュメントが必要なら適宜調整）
         logger.info("Clearing all existing documents from the new index...")
         cleared = search_manager.clear_all_documents()
         if not cleared:
@@ -642,6 +673,46 @@ async def upload_pdf(file: UploadFile = File(...)) -> StandardResponse:
         return StandardResponse(
             success=False,
             message=f"Upload failed: {str(e)}",
+            timestamp=datetime.now().isoformat()
+        )
+
+@app.post("/index-reset", response_model=StandardResponse)
+def index_reset() -> StandardResponse:
+    """
+    indexer と index を削除し、再作成（reset）するエンドポイント。
+    ※ Data Source は削除せず、そのまま残します。
+    """
+    try:
+        # 1. indexer と index の削除
+        logger.info("Deleting only indexer and index (keeping data source).")
+        errors = search_manager.delete_index_and_indexer_only()
+        if errors:
+            logger.warning(f"Some errors occurred while deleting indexer/index: {errors}")
+
+        # 2. index と indexer の再作成
+        logger.info("Re-creating index and indexer...")
+        # インデックスを再作成するため、PUT /indexes/{indexName} と /indexers/{indexerName} を実行
+        # → 既存の create_search_resources() では data source も作成してしまうが、
+        #    data source を上書きしても問題なければそのまま利用
+        success = search_manager.create_search_resources()
+        if not success:
+            return StandardResponse(
+                success=False,
+                message="Failed to recreate index/indexer.",
+                timestamp=datetime.now().isoformat()
+            )
+
+        return StandardResponse(
+            success=True,
+            message="Index と Indexer をリセットしました。",
+            timestamp=datetime.now().isoformat()
+        )
+
+    except Exception as e:
+        logger.error(f"Index reset error: {str(e)}")
+        return StandardResponse(
+            success=False,
+            message=f"Index reset failed: {str(e)}",
             timestamp=datetime.now().isoformat()
         )
 
@@ -682,7 +753,6 @@ async def get_indexer_status() -> StandardResponse:
             message=f"Failed to get indexer status: {str(e)}",
             timestamp=datetime.now().isoformat()
         )
-
 
 @app.get("/pdf-content", response_model=StandardResponse)
 async def get_pdf_content_endpoint(query: str = "*") -> StandardResponse:
@@ -729,7 +799,6 @@ async def get_pdf_content_endpoint(query: str = "*") -> StandardResponse:
             message=f"Failed to retrieve PDF content: {str(e)}",
             timestamp=datetime.now().isoformat()
         )
-
 
 @app.post("/chat", response_model=StandardResponse)
 async def chat(prompt: str) -> StandardResponse:
@@ -799,14 +868,10 @@ async def chat(prompt: str) -> StandardResponse:
             timestamp=datetime.now().isoformat()
         )
 
-
 @app.get("/health")
 async def health() -> Dict[str, str]:
-    """
-    ヘルスチェック用。
-    """
+    """ヘルスチェック用。"""
     return {"status": "healthy", "service": "simplerag"}
-
 
 # # ローカル実行用
 # if __name__ == "__main__":
