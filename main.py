@@ -402,7 +402,6 @@ class AzureSearchManager:
                 "select": ["content", "metadata_storage_name", "metadata_storage_path"],
                 "top": top_k,
                 "query_type": "simple",
-                "query_language": "ja-JP"
             }
             results = search_client.search(query, **search_opts)
 
@@ -881,14 +880,91 @@ async def health() -> Dict[str, str]:
     """ヘルスチェック用。"""
     return {"status": "healthy", "service": "simplerag"}
 
+@app.get("/upload-status", response_model=StandardResponse)
+async def get_upload_status() -> StandardResponse:
+    """
+    PDFファイルのアップロード状態を確認するエンドポイント。
+    - コンテナにPDFがあるか
+    - インデクサーのステータス
+    - インデックスの状態
+    をまとめて返す。
+    """
+    try:
+        # 1. Blobコンテナにファイルが存在するか確認
+        blobs = list(blob_manager.container_client.list_blobs())
+        pdf_files = [blob.name for blob in blobs if blob.name.lower().endswith('.pdf')]
+        
+        # 2. インデクサーの状態を取得
+        indexer_status = search_manager.get_indexer_status()
+        
+        # 3. インデックスにドキュメントがあるか確認
+        docs_count = 0
+        try:
+            search_client = SearchClient(
+                endpoint=search_manager.endpoint,
+                index_name=search_manager.index_name,
+                credential=AzureKeyCredential(search_manager.api_key),
+                api_version=search_manager.api_version
+            )
+            results = list(search_client.search("*", top=1))
+            docs_count = len(results)
+        except Exception as e:
+            logger.warning(f"Error checking index documents: {str(e)}")
+        
+        status_data = {
+            "pdf_files": pdf_files,
+            "pdf_count": len(pdf_files),
+            "indexer_status": indexer_status,
+            "has_documents": docs_count > 0,
+            "documents_count": docs_count
+        }
+        
+        # 4. 総合的な状態判定
+        if not pdf_files:
+            message = "PDFファイルがまだアップロードされていません。"
+            success = False
+        elif indexer_status == "not_found":
+            message = "PDFはアップロードされていますが、インデクサーが見つかりません。"
+            success = False
+        elif indexer_status.startswith("error"):
+            message = f"PDFはアップロードされていますが、インデクサーにエラーがあります: {indexer_status}"
+            success = False
+        elif indexer_status == "inProgress":
+            message = "PDFはアップロードされ、インデックス作成が現在進行中です。"
+            success = True
+        elif indexer_status == "success" and docs_count > 0:
+            message = "PDFのアップロードとインデックス作成が完了しています。"
+            success = True
+        elif indexer_status == "success" and docs_count == 0:
+            message = "PDFはアップロードされインデクサーは成功していますが、インデックスにドキュメントがありません。"
+            success = False
+        else:
+            message = f"PDFアップロード状態: インデクサー={indexer_status}, ドキュメント数={docs_count}"
+            success = True
+            
+        return StandardResponse(
+            success=success,
+            message=message,
+            data=status_data,
+            timestamp=datetime.now().isoformat()
+        )
+        
+    except Exception as e:
+        logger.error(f"Error checking upload status: {str(e)}")
+        return StandardResponse(
+            success=False,
+            message=f"アップロード状態の確認中にエラーが発生しました: {str(e)}",
+            timestamp=datetime.now().isoformat()
+        )
+
 # ローカル実行用
-# if __name__ == "__main__":
-#     port = int(os.environ.get("PORT", 8000))
-#     host = os.environ.get("HOST", "localhost")
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    host = os.environ.get("HOST", "localhost")
 
-#     logger.info("=== SimpleRAG API Server ===")
-#     logger.info(f"API documentation available at: http://{host}:{port}/docs")
-#     logger.info(f"Health check endpoint: http://{host}:{port}/health")
-#     logger.info(f"Starting FastAPI server on {host}:{port}...")
+    logger.info("=== SimpleRAG API Server ===")
+    logger.info(f"API documentation available at: http://{host}:{port}/docs")
+    logger.info(f"Health check endpoint: http://{host}:{port}/health")
+    logger.info(f"Starting FastAPI server on {host}:{port}...")
 
-#     uvicorn.run(app, host=host, port=port, log_level="info", reload=False)
+    uvicorn.run(app, host=host, port=port, log_level="info", reload=False)
