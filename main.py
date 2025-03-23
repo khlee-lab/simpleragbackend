@@ -50,7 +50,7 @@ AZURE_SEARCH_KEY = os.environ.get("AZURE_SEARCH_KEY")
 INDEX_NAME = os.environ.get("INDEX_NAME", "azureblob-index")
 DATASOURCE_NAME = os.environ.get("DATASOURCE_NAME", "simplerag")
 INDEXER_NAME = os.environ.get("INDEXER_NAME", "azureblob-indexer")
-AZURE_SEARCH_API_VERSION = "2024-07-01"
+AZURE_SEARCH_API_VERSION = os.environ.get("AZURE_SEARCH_API_VERSION", "2023-11-01")
 
 # Azure OpenAI
 AZURE_OPENAI_API_ENDPOINT = os.environ.get("AZURE_OPENAI_API_ENDPOINT")
@@ -174,11 +174,13 @@ class AzureSearchManager:
         # SDKクライアント
         self.indexer_client = SearchIndexerClient(
             endpoint=self.endpoint,
-            credential=AzureKeyCredential(self.api_key)
+            credential=AzureKeyCredential(self.api_key),
+            api_version=self.api_version
         )
         self.index_client = SearchIndexClient(
             endpoint=self.endpoint,
-            credential=AzureKeyCredential(self.api_key)
+            credential=AzureKeyCredential(self.api_key),
+            api_version=self.api_version
         )
 
     def delete_search_resources(self) -> Tuple[bool, List[str]]:
@@ -260,7 +262,7 @@ class AzureSearchManager:
             ds_resp.raise_for_status()
             logger.info(f"Data source '{self.datasource_name}' created/updated.")
 
-            # 2. インデックス作成/更新
+            # 2. インデックス作成/更新 (semantic機能なし)
             index_url = f"{self.endpoint}/indexes/{self.index_name}?api-version={self.api_version}"
             index_body = {
                 "name": self.index_name,
@@ -297,21 +299,7 @@ class AzureSearchManager:
                         "searchable": False,
                         "retrievable": True
                     }
-                ],
-                "semantic": {
-                    "configurations": [
-                        {
-                            "name": "default",
-                            "prioritizedFields": {
-                                "titleField": None,
-                                "contentFields": [
-                                    {"fieldName": "content"}
-                                ],
-                                "keywordsFields": []
-                            }
-                        }
-                    ]
-                }
+                ]
             }
             idx_resp = requests.put(index_url, headers=headers, json=index_body)
             idx_resp.raise_for_status()
@@ -348,8 +336,13 @@ class AzureSearchManager:
             # 4. インデクサーを今すぐ実行
             run_url = f"{self.endpoint}/indexers/{self.indexer_name}/run?api-version={self.api_version}"
             run_resp = requests.post(run_url, headers=headers)
-            run_resp.raise_for_status()
-            logger.info(f"Indexer '{self.indexer_name}' triggered to run.")
+            if run_resp.status_code in self.SUCCESSFUL_RUN_STATUS_CODES:
+                logger.info(f"Indexer '{self.indexer_name}' triggered to run.")
+            elif run_resp.status_code == 409:
+                # 既に実行中の場合
+                logger.warning("Indexer is already running. (409 Conflict)")
+            else:
+                run_resp.raise_for_status()
 
             return True
         except Exception as e:
@@ -368,8 +361,12 @@ class AzureSearchManager:
             if resp.status_code in self.SUCCESSFUL_RUN_STATUS_CODES:
                 logger.info(f"Indexer '{self.indexer_name}' run triggered.")
                 return True
-            logger.warning(f"Failed to trigger indexer run: {resp.status_code}, {resp.text}")
-            return False
+            elif resp.status_code == 409:
+                logger.warning("Indexer is already running. (409 Conflict)")
+                return True
+            else:
+                logger.warning(f"Failed to trigger indexer run: {resp.status_code}, {resp.text}")
+                return False
         except Exception as e:
             logger.error(f"Error running indexer: {str(e)}")
             return False
@@ -381,12 +378,7 @@ class AzureSearchManager:
         - "error:" で始まる: 何らかのエラー
         """
         try:
-            idx_client = SearchIndexerClient(
-                endpoint=self.endpoint,
-                credential=AzureKeyCredential(self.api_key),
-                api_version=self.api_version
-            )
-            status = idx_client.get_indexer_status(self.indexer_name)
+            status = self.indexer_client.get_indexer_status(self.indexer_name)
             return status.last_result.status
         except ResourceNotFoundError:
             return "not_found"
@@ -463,31 +455,50 @@ class AzureSearchManager:
 
     def clear_all_documents(self) -> bool:
         """
-        インデックス内のすべてのドキュメントを削除するが、インデックスの構造は保持する。
-        ワイルドカード（'*'）で一括削除を行う。
+        インデックス内のすべてのドキュメントを削除するが、インデックス構造は保持する。
+        ドキュメントを個別に削除 (ワイルドカード '*' は使わない)
         """
         try:
+            search_client = SearchClient(
+                endpoint=self.endpoint,
+                index_name=self.index_name,
+                credential=AzureKeyCredential(self.api_key),
+                api_version=self.api_version
+            )
+            # 1. 全件検索
+            all_docs = list(search_client.search(search_text="*", top=1000))
+            if not all_docs:
+                logger.info("No documents found; nothing to delete.")
+                return True
+
+            # 2. 削除バッチ作成
+            actions = []
+            for doc in all_docs:
+                doc_id = doc.get("id")
+                if doc_id:
+                    actions.append({
+                        "@search.action": "delete",
+                        "id": doc_id
+                    })
+
+            if not actions:
+                logger.info("No valid document IDs found; skip delete.")
+                return True
+
             url = f"{self.endpoint}/indexes/{self.index_name}/docs/index?api-version={self.api_version}"
             headers = {
                 "Content-Type": "application/json",
                 "api-key": self.api_key
             }
-            payload = {
-                "value": [
-                    {
-                        "@search.action": "delete",
-                        "id": "*"
-                    }
-                ]
-            }
-            logger.info("Clearing all documents from the index using wildcard delete.")
-            response = requests.post(url, headers=headers, json=payload)
+            payload = {"value": actions}
 
-            if response.status_code in (200, 207):
+            logger.info(f"Deleting {len(actions)} documents from the index individually...")
+            resp = requests.post(url, headers=headers, json=payload)
+            if resp.status_code in (200, 207):
                 logger.info("Index documents cleared successfully.")
                 return True
             else:
-                logger.error(f"Failed to clear index documents: {response.status_code} - {response.text}")
+                logger.error(f"Failed to delete docs individually: {resp.status_code} - {resp.text}")
                 return False
         except Exception as e:
             logger.error(f"Error clearing index documents: {str(e)}")
@@ -500,7 +511,7 @@ class AzureSearchManager:
             List[str]: 削除時に発生したエラーメッセージのリスト（なければ空）
         """
         errors: List[str] = []
-        # -- インデクサ削除
+        # インデクサ削除
         try:
             self.indexer_client.delete_indexer(self.indexer_name)
             logger.info(f"Indexer '{self.indexer_name}' deleted.")
@@ -511,7 +522,7 @@ class AzureSearchManager:
             logger.warning(msg)
             errors.append(msg)
 
-        # -- インデックス削除
+        # インデックス削除
         try:
             self.index_client.delete_index(self.index_name)
             logger.info(f"Index '{self.index_name}' deleted.")
@@ -620,28 +631,32 @@ openai_manager = AzureOpenAIManager(
 async def upload_pdf(file: UploadFile = File(...)) -> StandardResponse:
     """
     新しいPDFをアップロードするたびに検索リソース(インデックスなど)とBlobをリセットし、
-    アップロードしたPDF一つだけがインデックスされるようにするエンドポイント。
+    アップロードしたPDFだけがインデックスされるようにするエンドポイント。
 
     1. 既存のAzure Searchリソース削除
     2. 既存Blobを削除
     3. 新PDFをアップロード
     4. Searchリソースを再作成
-    5. インデックス内のドキュメントをクリア
+    5. インデックス内のドキュメントを削除
     6. インデクサを手動実行
     """
     try:
+        # 1. Azure Search リソース削除
         logger.info("Deleting existing search resources...")
         success, errors = search_manager.delete_search_resources()
         if not success:
             logger.warning(f"Some errors occurred while deleting search resources: {errors}")
 
+        # 2. Blobを削除
         logger.info("Deleting all existing blobs...")
         blob_manager.delete_all_blobs()
 
+        # 3. 新しいPDFをアップロード
         logger.info("Uploading new PDF...")
         content = await file.read()
         blob_manager.upload_blob(file.filename, content)
 
+        # 4. リソース再作成 (DataSource, Index, Indexer) & インデクサー実行
         logger.info("Creating new search resources...")
         created = search_manager.create_search_resources()
         if not created:
@@ -651,12 +666,13 @@ async def upload_pdf(file: UploadFile = File(...)) -> StandardResponse:
                 timestamp=datetime.now().isoformat()
             )
 
-        # clear_all_documents を呼び出す（※インデックス再作成後にドキュメントが必要なら適宜調整）
+        # 5. インデックス内ドキュメントを個別削除
         logger.info("Clearing all existing documents from the new index...")
         cleared = search_manager.clear_all_documents()
         if not cleared:
             logger.warning("Failed to clear documents in the index (it may already be empty).")
 
+        # 6. インデクサーを手動実行 (2回目)
         logger.info("Manually triggering indexer run...")
         run_res = search_manager.run_indexer()
         indexer_status = "running" if run_res else "not_running"
@@ -680,20 +696,15 @@ async def upload_pdf(file: UploadFile = File(...)) -> StandardResponse:
 def index_reset() -> StandardResponse:
     """
     indexer と index を削除し、再作成（reset）するエンドポイント。
-    ※ Data Source は削除せず、そのまま残します。
+    ※ Data Source は削除しない
     """
     try:
-        # 1. indexer と index の削除
         logger.info("Deleting only indexer and index (keeping data source).")
         errors = search_manager.delete_index_and_indexer_only()
         if errors:
             logger.warning(f"Some errors occurred while deleting indexer/index: {errors}")
 
-        # 2. index と indexer の再作成
         logger.info("Re-creating index and indexer...")
-        # インデックスを再作成するため、PUT /indexes/{indexName} と /indexers/{indexerName} を実行
-        # → 既存の create_search_resources() では data source も作成してしまうが、
-        #    data source を上書きしても問題なければそのまま利用
         success = search_manager.create_search_resources()
         if not success:
             return StandardResponse(
@@ -715,7 +726,6 @@ def index_reset() -> StandardResponse:
             message=f"Index reset failed: {str(e)}",
             timestamp=datetime.now().isoformat()
         )
-
 
 @app.get("/indexer-status", response_model=StandardResponse)
 async def get_indexer_status() -> StandardResponse:
@@ -841,7 +851,6 @@ async def chat(prompt: str) -> StandardResponse:
         else:
             pdf_context = "No PDF content found."
 
-        # システムメッセージ
         system_message = (
             "You are an AI assistant that helps answer questions based on PDF documents.\n"
             "Answer based ONLY on the content in the documents provided below.\n"
@@ -850,7 +859,6 @@ async def chat(prompt: str) -> StandardResponse:
             f"{pdf_context}"
         )
 
-        # OpenAIに問い合わせ
         answer = openai_manager.chat_completion(system_message, prompt)
 
         return StandardResponse(
@@ -873,9 +881,14 @@ async def health() -> Dict[str, str]:
     """ヘルスチェック用。"""
     return {"status": "healthy", "service": "simplerag"}
 
-# # ローカル実行用
+# ローカル実行用
 # if __name__ == "__main__":
 #     port = int(os.environ.get("PORT", 8000))
-#     host = os.environ.get("HOST", "0.0.0.0")
+#     host = os.environ.get("HOST", "localhost")
+
+#     logger.info("=== SimpleRAG API Server ===")
+#     logger.info(f"API documentation available at: http://{host}:{port}/docs")
+#     logger.info(f"Health check endpoint: http://{host}:{port}/health")
 #     logger.info(f"Starting FastAPI server on {host}:{port}...")
-#     uvicorn.run(app, host=host, port=port)
+
+#     uvicorn.run(app, host=host, port=port, log_level="info", reload=False)
