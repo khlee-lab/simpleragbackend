@@ -25,9 +25,16 @@ from openai import AzureOpenAI
 from pydantic import BaseModel
 
 # =========================================================
-# ログ設定
+# 로그 설정
 # =========================================================
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('simplerag.log') if os.environ.get('LOG_TO_FILE') else logging.NullHandler()
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # =========================================================
@@ -92,6 +99,27 @@ class StandardResponse(BaseModel):
     message: str
     data: Optional[Any] = None
     timestamp: str
+
+class ChatRequest(BaseModel):
+    """チャットリクエスト用モデル。"""
+    prompt: str
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 0.95
+    
+    class Config:
+        str_strip_whitespace = True
+        min_anystr_length = 1
+        max_anystr_length = 10000
+
+class SearchRequest(BaseModel):
+    """検索リクエスト用モデル。"""
+    query: str = "*"
+    top_k: Optional[int] = 3
+    
+    class Config:
+        str_strip_whitespace = True
+        min_anystr_length = 1
+        max_anystr_length = 1000
 
 # =========================================================
 # Azure Blob管理クラス
@@ -586,17 +614,91 @@ class AzureOpenAIManager:
             raise
 
 # =========================================================
-# FastAPIアプリ
+# 상수 정의
 # =========================================================
-app = FastAPI(docs_url="/docs", redoc_url="/redoc")
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+ALLOWED_FILE_TYPES = {"application/pdf", "application/x-pdf"}
+ALLOWED_FILE_EXTENSIONS = {".pdf"}
 
-# CORS設定
+# =========================================================
+# 유틸리티 함수
+# =========================================================
+def validate_pdf_file(file: UploadFile) -> Optional[str]:
+    """PDF 파일 유효성 검사"""
+    if not file.filename:
+        return "파일명이 없습니다."
+    
+    if not file.filename.lower().endswith('.pdf'):
+        return "PDF 파일만 업로드 가능합니다."
+    
+    if file.content_type not in ALLOWED_FILE_TYPES:
+        return f"지원되지 않는 파일 형식입니다. PDF 파일만 업로드 가능합니다."
+    
+    return None
+
+def create_error_response(message: str, data: Optional[Any] = None) -> StandardResponse:
+    """에러 응답 생성"""
+    return StandardResponse(
+        success=False,
+        message=message,
+        data=data,
+        timestamp=datetime.now().isoformat()
+    )
+
+def create_success_response(message: str, data: Optional[Any] = None) -> StandardResponse:
+    """성공 응답 생성"""
+    return StandardResponse(
+        success=True,
+        message=message,
+        data=data,
+        timestamp=datetime.now().isoformat()
+    )
+
+# =========================================================
+# 에러 처리 상수
+# =========================================================
+ERROR_MESSAGES = {
+    "UPLOAD_FAILED": "파일 업로드에 실패했습니다",
+    "INVALID_FILE": "유효하지 않은 파일입니다",
+    "FILE_TOO_LARGE": "파일 크기가 너무 큽니다",
+    "INDEXER_NOT_FOUND": "인덱서를 찾을 수 없습니다",
+    "SEARCH_FAILED": "검색에 실패했습니다",
+    "CHAT_FAILED": "채팅 응답 생성에 실패했습니다",
+    "VALIDATION_ERROR": "입력값이 유효하지 않습니다"
+}
+
+# FastAPI 애플리케이션 및 미들웨어 설정
+app = FastAPI(
+    title="SimpleRAG API",
+    description="PDF 문서 기반 RAG(Retrieval-Augmented Generation) API",
+    version="1.0.0",
+    docs_url="/docs", 
+    redoc_url="/redoc"
+)
+
+# 에러 핸들러 추가
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    logger.error(f"전역 예외 발생: {str(exc)}")
+    return create_error_response("서버 내부 오류가 발생했습니다. 관리자에게 문의하세요.")
+
+# 요청 로깅 미들웨어
+@app.middleware("http")
+async def log_requests(request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    process_time = time.time() - start_time
+    logger.info(f"{request.method} {request.url} - {response.status_code} - {process_time:.2f}s")
+    return response
+
+# CORS設定 - 보안 강화
+allowed_origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"]
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"]
 )
 
 # =========================================================
@@ -629,275 +731,317 @@ openai_manager = AzureOpenAIManager(
 @app.post("/upload", response_model=StandardResponse)
 async def upload_pdf(file: UploadFile = File(...)) -> StandardResponse:
     """
-    新しいPDFをアップロードするたびに検索リソース(インデックスなど)とBlobをリセットし、
-    アップロードしたPDFだけがインデックスされるようにするエンドポイント。
+    새로운 PDF를 업로드할 때마다 검색 리소스(인덱스 등)와 Blob을 리셋하고,
+    업로드한 PDF만 인덱싱되도록 하는 엔드포인트.
 
-    1. 既存のAzure Searchリソース削除
-    2. 既存Blobを削除
-    3. 新PDFをアップロード
-    4. Searchリソースを再作成
-    5. インデックス内のドキュメントを削除
-    6. インデクサを手動実行
+    1. 파일 유효성 검사
+    2. 기존 Azure Search 리소스 삭제
+    3. 기존 Blob 삭제
+    4. 새 PDF 업로드
+    5. Search 리소스 재생성
+    6. 인덱스 내 문서 삭제
+    7. 인덱서 수동 실행
     """
     try:
-        # 1. Azure Search リソース削除
-        logger.info("Deleting existing search resources...")
+        # 1. 파일 유효성 검사
+        validation_error = validate_pdf_file(file)
+        if validation_error:
+            return create_error_response(validation_error)
+        
+        # 파일 크기 검사 (스트림으로 읽기 전에 미리 확인)
+        content = await file.read()
+        if len(content) > MAX_FILE_SIZE:
+            return create_error_response(f"파일 크기가 너무 큽니다. 최대 {MAX_FILE_SIZE // (1024*1024)}MB까지 업로드 가능합니다.")
+        
+        if len(content) == 0:
+            return create_error_response("빈 파일입니다.")
+
+        # 2. 기존 Azure Search 리소스 삭제
+        logger.info("기존 검색 리소스 삭제 중...")
         success, errors = search_manager.delete_search_resources()
         if not success:
-            logger.warning(f"Some errors occurred while deleting search resources: {errors}")
+            logger.warning(f"검색 리소스 삭제 중 일부 오류 발생: {errors}")
 
-        # 2. Blobを削除
-        logger.info("Deleting all existing blobs...")
+        # 3. 기존 Blob 삭제
+        logger.info("기존 Blob 삭제 중...")
         blob_manager.delete_all_blobs()
 
-        # 3. 新しいPDFをアップロード
-        logger.info("Uploading new PDF...")
-        content = await file.read()
+        # 4. 새 PDF 업로드
+        logger.info("새 PDF 업로드 중...")
         blob_manager.upload_blob(file.filename, content)
 
-        # 4. リソース再作成 (DataSource, Index, Indexer) & インデクサー実行
-        logger.info("Creating new search resources...")
+        # 5. 리소스 재생성 (DataSource, Index, Indexer) & 인덱서 실행
+        logger.info("새 검색 리소스 생성 중...")
         created = search_manager.create_search_resources()
         if not created:
-            return StandardResponse(
-                success=False,
-                message="Failed to recreate search resources.",
-                timestamp=datetime.now().isoformat()
-            )
+            return create_error_response("검색 리소스 재생성에 실패했습니다.")
 
-        # 5. インデックス内ドキュメントを個別削除
-        logger.info("Clearing all existing documents from the new index...")
+        # 6. 인덱스 내 문서 개별 삭제
+        logger.info("인덱스에서 기존 문서 삭제 중...")
         cleared = search_manager.clear_all_documents()
         if not cleared:
-            logger.warning("Failed to clear documents in the index (it may already be empty).")
+            logger.warning("인덱스 문서 삭제 실패 (이미 비어있을 수 있음)")
 
-        # 6. インデクサーを手動実行 (2回目)
-        logger.info("Manually triggering indexer run...")
+        # 7. 인덱서 수동 실행 (2회차)
+        logger.info("인덱서 수동 실행 중...")
         run_res = search_manager.run_indexer()
         indexer_status = "running" if run_res else "not_running"
 
-        return StandardResponse(
-            success=True,
-            message="ファイルアップロードとインデックス再作成が完了しました。既存のドキュメントは削除済みです。",
-            data={"filename": file.filename, "indexer_status": indexer_status},
-            timestamp=datetime.now().isoformat()
+        return create_success_response(
+            "파일 업로드와 인덱스 재생성이 완료되었습니다. 기존 문서는 삭제되었습니다.",
+            {"filename": file.filename, "indexer_status": indexer_status, "file_size": len(content)}
         )
 
     except Exception as e:
-        logger.error(f"Upload error: {str(e)}")
-        return StandardResponse(
-            success=False,
-            message=f"Upload failed: {str(e)}",
-            timestamp=datetime.now().isoformat()
-        )
+        logger.error(f"업로드 오류: {str(e)}")
+        return create_error_response(f"업로드 실패: {str(e)}")
 
 @app.post("/index-reset", response_model=StandardResponse)
 def index_reset() -> StandardResponse:
     """
-    indexer と index を削除し、再作成（reset）するエンドポイント。
-    ※ Data Source は削除しない
+    인덱서와 인덱스를 삭제하고 재생성(리셋)하는 엔드포인트.
+    ※ 데이터 소스는 삭제하지 않음
     """
     try:
-        logger.info("Deleting only indexer and index (keeping data source).")
+        logger.info("인덱서와 인덱스만 삭제 중 (데이터 소스는 유지)")
         errors = search_manager.delete_index_and_indexer_only()
         if errors:
-            logger.warning(f"Some errors occurred while deleting indexer/index: {errors}")
+            logger.warning(f"인덱서/인덱스 삭제 중 일부 오류 발생: {errors}")
 
-        logger.info("Re-creating index and indexer...")
+        logger.info("인덱스와 인덱서 재생성 중...")
         success = search_manager.create_search_resources()
         if not success:
-            return StandardResponse(
-                success=False,
-                message="Failed to recreate index/indexer.",
-                timestamp=datetime.now().isoformat()
-            )
+            return create_error_response("인덱스/인덱서 재생성에 실패했습니다.")
 
-        return StandardResponse(
-            success=True,
-            message="Index と Indexer をリセットしました。",
-            timestamp=datetime.now().isoformat()
+        return create_success_response(
+            "인덱스와 인덱서를 리셋했습니다.",
+            {"reset_time": datetime.now().isoformat()}
         )
 
     except Exception as e:
-        logger.error(f"Index reset error: {str(e)}")
-        return StandardResponse(
-            success=False,
-            message=f"Index reset failed: {str(e)}",
-            timestamp=datetime.now().isoformat()
-        )
+        logger.error(f"인덱스 리셋 오류: {str(e)}")
+        return create_error_response(f"인덱스 리셋 실패: {str(e)}")
 
 @app.get("/indexer-status", response_model=StandardResponse)
 async def get_indexer_status() -> StandardResponse:
     """
-    インデクサーのステータスを返すエンドポイント。
+    인덱서의 상태를 반환하는 엔드포인트.
     """
     try:
         status = search_manager.get_indexer_status()
+        
         if status == "not_found":
-            return StandardResponse(
-                success=False,
-                message="インデクサーが見つかりません。PDFをアップロードしてください。",
-                data={"indexer_status": "not_found"},
-                timestamp=datetime.now().isoformat()
+            return create_error_response(
+                "인덱서를 찾을 수 없습니다. PDF를 업로드해주세요.",
+                {"indexer_status": "not_found"}
             )
+        
         if status.startswith("error:"):
-            return StandardResponse(
-                success=False,
-                message=f"インデクサー エラー: {status}",
-                data={"indexer_status": status},
-                timestamp=datetime.now().isoformat()
+            return create_error_response(
+                f"인덱서 오류: {status}",
+                {"indexer_status": status}
             )
 
-        return StandardResponse(
-            success=True,
-            message="インデクサーの状態を取得しました。",
-            data={"indexer_status": status},
-            timestamp=datetime.now().isoformat()
+        return create_success_response(
+            "인덱서 상태를 가져왔습니다.",
+            {"indexer_status": status}
         )
 
     except Exception as e:
-        logger.error(f"Failed to get indexer status: {str(e)}")
-        return StandardResponse(
-            success=False,
-            message=f"Failed to get indexer status: {str(e)}",
-            timestamp=datetime.now().isoformat()
-        )
+        logger.error(f"인덱서 상태 가져오기 실패: {str(e)}")
+        return create_error_response(f"인덱서 상태 가져오기 실패: {str(e)}")
 
 @app.get("/pdf-content", response_model=StandardResponse)
-async def get_pdf_content_endpoint(query: str = "*") -> StandardResponse:
+async def get_pdf_content_endpoint(query: str = "*", top_k: int = 3) -> StandardResponse:
     """
-    指定したクエリ(query)をもとにAzure Searchへ全文検索を行い、
-    ヒットしたPDFのコンテンツを返す。
+    지정된 쿼리로 Azure Search에서 전문 검색을 수행하고,
+    일치하는 PDF 콘텐츠를 반환합니다.
     """
     try:
+        # 입력 검증
+        if len(query.strip()) == 0:
+            return create_error_response("검색어를 입력해주세요.")
+        
+        if len(query) > 1000:
+            return create_error_response("검색어가 너무 깁니다. 1000자 이하로 입력해주세요.")
+        
+        if top_k < 1 or top_k > 50:
+            return create_error_response("결과 개수는 1~50개 사이여야 합니다.")
+        
+        # 인덱서 상태 확인
         status = search_manager.get_indexer_status()
         if status == "not_found":
-            return StandardResponse(
-                success=False,
-                message="インデクサーが見つかりません。PDFをアップロードしてください。",
-                data={"status": "not_found"},
-                timestamp=datetime.now().isoformat()
-            )
+            return create_error_response("인덱서를 찾을 수 없습니다. PDF를 업로드해주세요.", {"status": "not_found"})
+        
         if status.startswith("error"):
-            return StandardResponse(
-                success=False,
-                message=f"インデクサー状態エラー: {status}",
-                data={"status": "error"},
-                timestamp=datetime.now().isoformat()
-            )
+            return create_error_response(f"인덱서 상태 오류: {status}", {"status": "error"})
+        
         if status != "success":
-            return StandardResponse(
-                success=False,
-                message="まだインデクシング中かもしれません。少し待って再試行してください。",
-                data={"status": status},
-                timestamp=datetime.now().isoformat()
-            )
+            return create_error_response("아직 인덱싱 중일 수 있습니다. 잠시 후 다시 시도해주세요.", {"status": status})
 
-        results = search_manager.search_pdf_content(query)
-        return StandardResponse(
-            success=True,
-            message="PDFの検索結果を返します。",
-            data=results,
-            timestamp=datetime.now().isoformat()
+        # PDF 내용 검색
+        results = search_manager.search_pdf_content(query, top_k)
+        
+        if "error" in results:
+            return create_error_response(f"검색 실패: {results['error']}")
+        
+        return create_success_response(
+            "PDF 검색 결과를 반환합니다.",
+            {
+                **results,
+                "top_k": top_k
+            }
         )
 
     except Exception as e:
-        logger.error(f"Error in get_pdf_content_endpoint: {str(e)}")
-        return StandardResponse(
-            success=False,
-            message=f"Failed to retrieve PDF content: {str(e)}",
-            timestamp=datetime.now().isoformat()
-        )
+        logger.error(f"PDF 내용 검색 오류: {str(e)}")
+        return create_error_response(f"PDF 내용 검색 실패: {str(e)}")
 
 @app.post("/chat", response_model=StandardResponse)
-async def chat(prompt: str) -> StandardResponse:
+async def chat(request: ChatRequest) -> StandardResponse:
     """
-    アップロード済みのPDF内容をもとにAzure OpenAIチャット回答を行う。
+    업로드된 PDF 내용을 기반으로 Azure OpenAI 채팅 응답을 수행합니다.
     """
     try:
+        # 입력 검증
+        if not request.prompt or len(request.prompt.strip()) == 0:
+            return create_error_response("질문을 입력해주세요.")
+        
+        if len(request.prompt) > 10000:
+            return create_error_response("질문이 너무 깁니다. 10000자 이하로 입력해주세요.")
+        
+        # 인덱서 상태 확인
         status = search_manager.get_indexer_status()
         if status == "not_found":
-            return StandardResponse(
-                success=False,
-                message="インデクサーが見つかりません。先にPDFをアップロードしてください。",
-                timestamp=datetime.now().isoformat()
-            )
+            return create_error_response("인덱서를 찾을 수 없습니다. 먼저 PDF를 업로드해주세요.")
+        
         if status.startswith("error:"):
-            return StandardResponse(
-                success=False,
-                message=f"インデクサー状態エラー: {status}",
-                timestamp=datetime.now().isoformat()
-            )
+            return create_error_response(f"인덱서 상태 오류: {status}")
+        
         if status != "success":
-            return StandardResponse(
-                success=False,
-                message="まだインデクシングが完了していません。再度お試しください。",
-                data={"status": status},
-                timestamp=datetime.now().isoformat()
-            )
+            return create_error_response("아직 인덱싱이 완료되지 않았습니다. 잠시 후 다시 시도해주세요.", {"status": status})
 
-        # PDFの全コンテンツを取得
+        # PDF 전체 내용 검색
         pdf_results = await search_manager.get_all_pdf_content()
         docs = pdf_results.get("documents", [])
+        
+        if not docs:
+            return create_error_response("PDF 내용을 찾을 수 없습니다.")
+        
+        # 컨텍스트 구성
         pdf_context = ""
         sources = []
-
-        if docs:
-            for i, doc in enumerate(docs):
-                pdf_context += f"Document {i+1}: {doc['filename']}\n"
-                pdf_context += f"Content: {doc['content']}\n\n"
-                sources.append({"filename": doc['filename'], "path": doc['path']})
-        else:
-            pdf_context = "No PDF content found."
-
+        
+        for i, doc in enumerate(docs):
+            pdf_context += f"문서 {i+1}: {doc['filename']}\n"
+            pdf_context += f"내용: {doc['content'][:5000]}...\n\n"  # 내용 길이 제한
+            sources.append({"filename": doc['filename'], "path": doc['path']})
+        
+        # 시스템 메시지 구성
         system_message = (
-            "You are an AI assistant that helps answer questions based on PDF documents.\n"
-            "Answer based ONLY on the content in the documents provided below.\n"
-            "If the information isn't in the documents, clearly state that.\n\n"
-            "Here is the content from the uploaded PDF documents:\n\n"
+            "당신은 PDF 문서를 기반으로 질문에 답변하는 AI 어시스턴트입니다.\n"
+            "아래 제공된 문서 내용만을 바탕으로 답변해주세요.\n"
+            "문서에 없는 정보라면 명확히 언급해주세요.\n"
+            "답변은 한국어로 해주세요.\n\n"
+            "업로드된 PDF 문서 내용:\n\n"
             f"{pdf_context}"
         )
 
-        answer = openai_manager.chat_completion(system_message, prompt)
+        # OpenAI API 호출
+        answer = openai_manager.chat_completion(
+            system_message, 
+            request.prompt,
+            temperature=request.temperature,
+            top_p=request.top_p
+        )
 
-        return StandardResponse(
-            success=True,
-            message="チャット応答が完了しました。",
-            data={"answer": answer, "sources": sources},
-            timestamp=datetime.now().isoformat()
+        return create_success_response(
+            "채팅 응답이 완료되었습니다.",
+            {
+                "answer": answer, 
+                "sources": sources,
+                "document_count": len(docs),
+                "prompt": request.prompt
+            }
         )
 
     except Exception as e:
-        logger.error(f"Chat error: {str(e)}")
-        return StandardResponse(
-            success=False,
-            message=f"Chat failed: {str(e)}",
-            timestamp=datetime.now().isoformat()
-        )
+        logger.error(f"채팅 오류: {str(e)}")
+        return create_error_response(f"채팅 실패: {str(e)}")
 
 @app.get("/health")
-async def health() -> Dict[str, str]:
-    """ヘルスチェック用。"""
-    return {"status": "healthy", "service": "simplerag"}
+async def health() -> Dict[str, Any]:
+    """헬스 체크용 엔드포인트."""
+    try:
+        # 기본 서비스 정보
+        health_info = {
+            "status": "healthy",
+            "service": "simplerag",
+            "version": "1.0.0",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # 환경 변수 확인 (민감한 정보는 제외)
+        required_env_vars = [
+            "AZURE_STORAGE_CONNECTION_STRING",
+            "CONTAINER_NAME", 
+            "AZURE_SEARCH_ENDPOINT",
+            "AZURE_SEARCH_KEY",
+            "AZURE_OPENAI_API_ENDPOINT",
+            "AZURE_OPENAI_API_KEY",
+            "AZURE_OPENAI_MODEL_NAME"
+        ]
+        
+        env_status = {}
+        for var in required_env_vars:
+            env_status[var] = "configured" if os.environ.get(var) else "missing"
+        
+        health_info["environment"] = env_status
+        
+        # 기본 연결 상태 확인
+        try:
+            # Blob 컨테이너 확인
+            blob_manager.container_client.get_container_properties()
+            health_info["blob_storage"] = "connected"
+        except Exception as e:
+            health_info["blob_storage"] = f"error: {str(e)}"
+        
+        try:
+            # 인덱서 상태 확인 (간단한 체크)
+            search_manager.get_indexer_status()
+            health_info["search_service"] = "connected"
+        except Exception as e:
+            health_info["search_service"] = f"error: {str(e)}"
+        
+        return health_info
+        
+    except Exception as e:
+        logger.error(f"헬스 체크 중 오류: {str(e)}")
+        return {
+            "status": "error",
+            "service": "simplerag",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
 
 @app.get("/upload-status", response_model=StandardResponse)
 async def get_upload_status() -> StandardResponse:
     """
-    PDFファイルのアップロード状態を確認するエンドポイント。
-    - コンテナにPDFがあるか
-    - インデクサーのステータス
-    - インデックスの状態
-    をまとめて返す。
+    PDF 파일의 업로드 상태를 확인하는 엔드포인트.
+    - 컨테이너에 PDF가 있는지
+    - 인덱서의 상태
+    - 인덱스의 상태
+    를 종합적으로 반환합니다.
     """
     try:
-        # 1. Blobコンテナにファイルが存在するか確認
+        # 1. Blob 컨테이너에 파일이 존재하는지 확인
         blobs = list(blob_manager.container_client.list_blobs())
         pdf_files = [blob.name for blob in blobs if blob.name.lower().endswith('.pdf')]
         
-        # 2. インデクサーの状態を取得
+        # 2. 인덱서 상태 가져오기
         indexer_status = search_manager.get_indexer_status()
         
-        # 3. インデックスにドキュメントがあるか確認
+        # 3. 인덱스에 문서가 있는지 확인
         docs_count = 0
         try:
             search_client = SearchClient(
@@ -909,37 +1053,39 @@ async def get_upload_status() -> StandardResponse:
             results = list(search_client.search("*", top=1))
             docs_count = len(results)
         except Exception as e:
-            logger.warning(f"Error checking index documents: {str(e)}")
+            logger.warning(f"인덱스 문서 확인 중 오류: {str(e)}")
         
+        # 상태 데이터 구성
         status_data = {
             "pdf_files": pdf_files,
             "pdf_count": len(pdf_files),
             "indexer_status": indexer_status,
             "has_documents": docs_count > 0,
-            "documents_count": docs_count
+            "documents_count": docs_count,
+            "last_checked": datetime.now().isoformat()
         }
         
-        # 4. 総合的な状態判定
+        # 4. 종합적인 상태 판정
         if not pdf_files:
-            message = "PDFファイルがまだアップロードされていません。"
+            message = "PDF 파일이 아직 업로드되지 않았습니다."
             success = False
         elif indexer_status == "not_found":
-            message = "PDFはアップロードされていますが、インデクサーが見つかりません。"
+            message = "PDF는 업로드되었지만 인덱서를 찾을 수 없습니다."
             success = False
         elif indexer_status.startswith("error"):
-            message = f"PDFはアップロードされていますが、インデクサーにエラーがあります: {indexer_status}"
+            message = f"PDF는 업로드되었지만 인덱서에 오류가 있습니다: {indexer_status}"
             success = False
         elif indexer_status == "inProgress":
-            message = "PDFはアップロードされ、インデックス作成が現在進行中です。"
+            message = "PDF가 업로드되었고 인덱스 생성이 현재 진행 중입니다."
             success = True
         elif indexer_status == "success" and docs_count > 0:
-            message = "PDFのアップロードとインデックス作成が完了しています。"
+            message = "PDF 업로드와 인덱스 생성이 완료되었습니다."
             success = True
         elif indexer_status == "success" and docs_count == 0:
-            message = "PDFはアップロードされインデクサーは成功していますが、インデックスにドキュメントがありません。"
+            message = "PDF는 업로드되고 인덱서는 성공했지만 인덱스에 문서가 없습니다."
             success = False
         else:
-            message = f"PDFアップロード状態: インデクサー={indexer_status}, ドキュメント数={docs_count}"
+            message = f"PDF 업로드 상태: 인덱서={indexer_status}, 문서수={docs_count}"
             success = True
             
         return StandardResponse(
@@ -950,12 +1096,8 @@ async def get_upload_status() -> StandardResponse:
         )
         
     except Exception as e:
-        logger.error(f"Error checking upload status: {str(e)}")
-        return StandardResponse(
-            success=False,
-            message=f"アップロード状態の確認中にエラーが発生しました: {str(e)}",
-            timestamp=datetime.now().isoformat()
-        )
+        logger.error(f"업로드 상태 확인 중 오류: {str(e)}")
+        return create_error_response(f"업로드 상태 확인 중 오류가 발생했습니다: {str(e)}")
 
 # ローカル実行用
 if __name__ == "__main__":
